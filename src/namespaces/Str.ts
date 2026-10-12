@@ -138,7 +138,9 @@ export class Str {
         return text(source).length;
     }
     match(source: string, pattern: string) {
-        return text(source).match(new RegExp(pattern));
+        // Pine returns the matched substring, or "" when nothing matches.
+        const m = text(source).match(new RegExp(text(pattern)));
+        return m ? m[0] : '';
     }
 
     split(source: string, separator: string) {
