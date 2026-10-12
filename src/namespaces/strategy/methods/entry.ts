@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundToMintick, sizingPrice } from '../utils';
+import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundToMintick, sizingPrice, isMarketCloseOrder, partialCloseQty } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -77,10 +77,25 @@ export function entry(context: any) {
         // entry reverses and the rest are plain pyramiding adds). The net
         // position change per queued order is `direction × qty`, which is exact
         // even for a reversal order since its qty already bakes in the close-qty.
+        // strategy.close / close_all market orders queued before this entry fill ahead of it
+        // too, so a close followed by an opposite entry opens just the entry's own qty, and a
+        // partial close leaves only the rest to reverse (TV, #316).
         let currentSize = strategy.position_size;
         for (const o of strategy.pending_orders) {
-            if (o.bar === context.idx && o.category === 'entry' && o.type === 'market') {
+            if (o.bar !== context.idx || o.status !== 'pending') continue;
+            if (o.category === 'entry' && o.type === 'market') {
                 currentSize += parseDirection(o.direction) * o.qty;
+            } else if (isMarketCloseOrder(o) && currentSize !== 0) {
+                let trades = strategy.opentrades.filter((t: any) => !o.from_entry || t.entry_id === o.from_entry);
+                if (o._intended_trade_ids) {
+                    const snapshot = new Set(o._intended_trade_ids);
+                    trades = trades.filter((t: any) => snapshot.has(t.id));
+                }
+                const tradesQty = trades.reduce((sum: number, t: any) => sum + Math.abs(t.size), 0);
+                let closeQty = tradesQty;
+                if (o.qty && o.qty > 0) closeQty = Math.min(o.qty, tradesQty);
+                else if (o.qty_percent && o.qty_percent > 0) closeQty = partialCloseQty(context, tradesQty, o.qty_percent);
+                currentSize -= Math.sign(currentSize) * Math.min(closeQty, Math.abs(currentSize));
             }
         }
 
