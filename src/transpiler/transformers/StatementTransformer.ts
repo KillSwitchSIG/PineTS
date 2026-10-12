@@ -790,6 +790,7 @@ export function transformVariableDeclaration(varNode: any, scopeManager: ScopeMa
 
 export function transformForStatement(node: any, scopeManager: ScopeManager, c: any): void {
     scopeManager.setSuppressHoisting(true);
+    scopeManager.setInLoopTest(true);
     // Handle initialization
     if (node.init && node.init.type === 'VariableDeclaration') {
         // Keep the original loop variable name
@@ -956,6 +957,7 @@ export function transformForStatement(node: any, scopeManager: ScopeManager, c: 
 
     // Transform the loop body
     scopeManager.setSuppressHoisting(false);
+    scopeManager.setInLoopTest(false);
 
     // Inject loop guard: hoist counter declaration before the loop
     const forGuardName = scopeManager.getNextLoopGuardName();
@@ -983,6 +985,7 @@ export function transformWhileStatement(node: any, scopeManager: ScopeManager, c
     // While-loop test conditions must NOT be hoisted — they're re-evaluated each iteration.
     // Suppress hoisting so namespace calls like array.size() stay inline.
     scopeManager.setSuppressHoisting(true);
+    scopeManager.setInLoopTest(true);
 
     // Transform the test condition like an `if` test (series identifiers read with $.get,
     // `na(x)` / namespace calls lowered once), with the calls kept inline.
@@ -991,6 +994,7 @@ export function transformWhileStatement(node: any, scopeManager: ScopeManager, c
     }
 
     scopeManager.setSuppressHoisting(false);
+    scopeManager.setInLoopTest(false);
 
     // Inject loop guard: hoist counter declaration before the loop
     const whileGuardName = scopeManager.getNextLoopGuardName();

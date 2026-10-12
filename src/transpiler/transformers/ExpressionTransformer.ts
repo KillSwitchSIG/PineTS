@@ -555,7 +555,15 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
             _transformed: true,
             _isParamCall: true,
         };
-        const getCall: any = ASTFactory.createGetCall(paramCall, memberNode.property);
+        // The series is recorded ahead of the statement: inline, a lazy `and` / `or` / `?:` operand would
+        // skip it on the bars where the operand is not evaluated, and `[n]` would then read a stale bar.
+        let series: any = paramCall;
+        if (scopeManager.addEagerHoistedStatement(ASTFactory.createVariableDeclaration(paramId, paramCall))) {
+            series = ASTFactory.createIdentifier(paramId);
+            series._skipTransformation = true;
+            series._arrayAccessed = true;
+        }
+        const getCall: any = ASTFactory.createGetCall(series, memberNode.property);
         getCall._transformed = true;
         getCall._historyTransformed = true;
         Object.assign(memberNode, getCall);

@@ -105,6 +105,33 @@ plot(noDiscriminant, "noDiscriminant")`);
     });
 });
 
+describe('history of a parenthesized expression in a lazy operand', () => {
+    it('records the series on every bar inside and / or / ?: and in a function', async () => {
+        const { series, close, open, n } = await run(`
+bool gate = bar_index % 3 == 0
+edgeFn() => close > open and not (close > open)[1]
+plot((gate and (close > open)[1]) ? 1 : 0, "and")
+plot((not gate or (close > open)[1]) ? 1 : 0, "or")
+plot((gate ? (close > open)[1] : false) ? 1 : 0, "tern")
+plot((close > open and not (close > open)[1]) ? 1 : 0, "edge")
+plot(edgeFn() ? 1 : 0, "edgeFn")`);
+        const up = (i: number) => close[i] > open[i];
+        const and = series('and'), or = series('or'), tern = series('tern'), edge = series('edge'), edgeFn = series('edgeFn');
+        let edges = 0;
+        for (let i = 1; i < n; i++) {
+            const gate = i % 3 === 0;
+            expect(and[i], `and bar ${i}`).toBe(gate && up(i - 1) ? 1 : 0);
+            expect(or[i], `or bar ${i}`).toBe(!gate || up(i - 1) ? 1 : 0);
+            expect(tern[i], `tern bar ${i}`).toBe(gate && up(i - 1) ? 1 : 0);
+            expect(edge[i], `edge bar ${i}`).toBe(up(i) && !up(i - 1) ? 1 : 0);
+            expect(edgeFn[i], `edgeFn bar ${i}`).toBe(up(i) && !up(i - 1) ? 1 : 0);
+            edges += edge[i];
+        }
+        // the series has more than one rising edge, so a stale history would show
+        expect(edges).toBeGreaterThan(2);
+    });
+});
+
 describe('str.match', () => {
     it('returns the matched text, or "" when nothing matches', async () => {
         const { series } = await run(`
