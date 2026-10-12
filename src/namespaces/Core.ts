@@ -470,7 +470,8 @@ export class Core {
     //types
     bool(series: any) {
         const val = Series.from(series).get(0);
-        return !isNaN(val) && val !== 0;
+        if (typeof val === 'boolean') return val;
+        return val !== null && val !== undefined && !isNaN(val) && val !== 0;
     }
     int(series: any) {
         const val = Series.from(series).get(0);

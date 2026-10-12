@@ -39,3 +39,22 @@ plot(str.length(miss), "missLen")`);
         expect(series('missLen').every((v) => v === 0)).toBe(true);
     });
 });
+
+describe('bool()', () => {
+    it('is false for false', async () => {
+        const { series } = await run(`
+bool f = false
+plot(bool(f) ? 1 : 0, "boolVar")
+plot(bool(false) ? 1 : 0, "boolLit")
+plot(bool(true) ? 1 : 0, "boolTrue")
+plot(bool(0) ? 1 : 0, "boolZero")
+plot(bool(1) ? 1 : 0, "boolOne")
+plot(bool(na) ? 1 : 0, "boolNa")`);
+        expect(series('boolVar').every((v) => v === 0)).toBe(true);
+        expect(series('boolLit').every((v) => v === 0)).toBe(true);
+        expect(series('boolTrue').every((v) => v === 1)).toBe(true);
+        expect(series('boolZero').every((v) => v === 0)).toBe(true);
+        expect(series('boolOne').every((v) => v === 1)).toBe(true);
+        expect(series('boolNa').every((v) => v === 0)).toBe(true);
+    });
+});
