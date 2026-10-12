@@ -26,6 +26,8 @@ plot(open, "o")`;
     return { series, close: series('c'), open: series('o'), n: times.length };
 }
 
+const isNa = (v: number) => v === null || v === undefined || Number.isNaN(v);
+
 describe('UDT fields declared without a type annotation', () => {
     it('infers int, float, bool and string fields from their defaults', async () => {
         const { series } = await run(`
@@ -52,6 +54,54 @@ plot(t2.a, "a2")`);
         expect(series('neg').every((v) => v === -2)).toBe(true);
         expect(series('typed').every((v) => v === 0.25)).toBe(true);
         expect(series('a2').every((v) => v === 10)).toBe(true);
+    });
+});
+
+describe('switch arm whose value is an if expression', () => {
+    it('returns the value of the taken branch', async () => {
+        const { series, close, open, n } = await run(`
+mode = input.string("T", "mode", options = ["P", "T"])
+bool v = switch mode
+    "P" => false
+    =>
+        if bar_index < 0
+            false
+        else
+            close > open
+float w = switch mode
+    "P" => 0.0
+    =>
+        float k = close * 2
+        if bar_index % 3 == 0
+            k
+        else if bar_index % 3 == 1
+            -k
+        else
+            0.0
+float noElse = switch mode
+    "P" => 0.0
+    =>
+        if bar_index % 2 == 0
+            1.0
+float noDiscriminant = switch
+    bar_index < 0 => -1.0
+    =>
+        if close > open
+            1.0
+        else
+            2.0
+plot(v ? 1 : 0, "v")
+plot(w, "w")
+plot(noElse, "noElse")
+plot(noDiscriminant, "noDiscriminant")`);
+        const v = series('v'), w = series('w'), noElse = series('noElse'), nd = series('noDiscriminant');
+        for (let i = 0; i < n; i++) {
+            expect(v[i], `v bar ${i}`).toBe(close[i] > open[i] ? 1 : 0);
+            expect(w[i], `w bar ${i}`).toBeCloseTo(i % 3 === 0 ? close[i] * 2 : i % 3 === 1 ? -close[i] * 2 : 0, 8);
+            if (i % 2 === 0) expect(noElse[i], `noElse bar ${i}`).toBe(1);
+            else expect(isNa(noElse[i]), `noElse bar ${i}`).toBe(true);
+            expect(nd[i], `noDiscriminant bar ${i}`).toBe(close[i] > open[i] ? 1 : 2);
+        }
     });
 });
 
