@@ -57,6 +57,59 @@ plot(t2.a, "a2")`);
     });
 });
 
+describe('switch expression assigned with :=', () => {
+    it('reads built-in series and other variables inside the arms', async () => {
+        const { series, close, open } = await run(`
+mode = input.string("T", "mode", options = ["P", "T"])
+var float x = na
+y = 7.0
+x := switch mode
+    "P" => 1.0
+    => y - (close - open)
+plot(x, "x")`);
+        series('x').forEach((v, i) => expect(v, `bar ${i}`).toBeCloseTo(7 - (close[i] - open[i]), 8));
+    });
+
+    it('resolves a two-level UDT member chain inside an arm', async () => {
+        const { series } = await run(`
+type S
+    bool buy = false
+type C
+    S signals
+var C cc = C.new(signals = S.new(true))
+mode = input.string("T", "mode", options = ["P", "T"])
+bool chain = false
+chain := switch mode
+    "P" => false
+    => cc.signals.buy
+plot(chain ? 1 : 0, "chain")`);
+        expect(series('chain').every((v) => v === 1)).toBe(true);
+    });
+
+    it('works inside a function and inside an if / else-if block', async () => {
+        const { series, close } = await run(`
+mode = input.string("T", "mode", options = ["P", "T"])
+f() =>
+    float r = 0.0
+    r := switch mode
+        "P" => 0.0
+        => close * 2
+    r
+var float z = na
+if bar_index < 0
+    z := 0.0
+else if true
+    z := 5.0
+    z := switch mode
+        "P" => 1.0
+        => z + close
+plot(f(), "f")
+plot(z, "z")`);
+        series('f').forEach((v, i) => expect(v, `bar ${i}`).toBeCloseTo(close[i] * 2, 8));
+        series('z').forEach((v, i) => expect(v, `bar ${i}`).toBeCloseTo(5 + close[i], 8));
+    });
+});
+
 describe('switch arm whose value is an if expression', () => {
     it('returns the value of the taken branch', async () => {
         const { series, close, open, n } = await run(`
