@@ -26,6 +26,35 @@ plot(open, "o")`;
     return { series, close: series('c'), open: series('o'), n: times.length };
 }
 
+describe('UDT fields declared without a type annotation', () => {
+    it('infers int, float, bool and string fields from their defaults', async () => {
+        const { series } = await run(`
+type T
+    a = 3
+    b = false
+    c = 1.5
+    s = "xy"
+    neg = -2
+    float typed = 0.25
+t = T.new()
+t2 = T.new(a = 10)
+plot(t.a + 1, "a")
+plot(t.b ? 1 : 0, "b")
+plot(t.c * 2, "c2")
+plot(str.length(t.s), "s")
+plot(t.neg, "neg")
+plot(t.typed, "typed")
+plot(t2.a, "a2")`);
+        expect(series('a').every((v) => v === 4)).toBe(true);
+        expect(series('b').every((v) => v === 0)).toBe(true);
+        expect(series('c2').every((v) => v === 3)).toBe(true);
+        expect(series('s').every((v) => v === 2)).toBe(true);
+        expect(series('neg').every((v) => v === -2)).toBe(true);
+        expect(series('typed').every((v) => v === 0.25)).toBe(true);
+        expect(series('a2').every((v) => v === 10)).toBe(true);
+    });
+});
+
 describe('str.match', () => {
     it('returns the matched text, or "" when nothing matches', async () => {
         const { series } = await run(`
