@@ -51,6 +51,25 @@
  * ta.linreg / ta.rci in local blocks, the same calls in six syntactic positions, and ta.percentile_*
  * with na (PercentileArray). Checked from k = 20, after the bars where PineTS backfills a first call
  * from the source history.
+ *
+ * `data/ta-coverage-btcusdt.json` covers what the files above do not: the window functions as a ternary
+ * branch (under `hour % 3 != 0` and `close > open`); the builtins and long-memory functions (atr,
+ * barssince, cum, dmi, kc, kcw, macd, max, min, nvi, obv, pvi, pvt, sar, supertrend, tr, accdist, iii,
+ * wad, wvad, vwap, pivot_point_levels, swma, valuewhen, rma, tsi) at the top level, in a local block and
+ * in a ternary; na sources (every 7th hour, and runs of three hours) for alma, bb, bbw, mfi, mom, roc,
+ * linreg, ema, swma, valuewhen, rma, tsi, kc, kcw, macd, vwap, cum, max, min, hma; and series leftbars /
+ * rightbars / length for the pivots, rising and falling. The cumulative builtins are plotted as changes
+ * (obv, accdist, pvt, wad) or ratios (nvi, pvi) over 24 bars, and cum / max / min on a source that is na
+ * before 2026-10-03, so that the values do not depend on where the history starts. 700 Binance candles
+ * before TradingView's warm up the long averages. Not in that file because PineTS differs from TradingView:
+ *  - ta.cross / crossover / crossunder / rising / falling in a local block or a ternary (including a
+ *    series length): on some bars TradingView compares with the previous call, not the previous bar;
+ *  - ta.accdist / pvt / wad / nvi / pvi read in a local block or a ternary: TradingView accumulates only
+ *    on the bars where they are read;
+ *  - ta.dmi, ta.barssince (TradingView counts the calls), ta.sar (na on TradingView) and
+ *    ta.pivot_point_levels (levels on TradingView, na in PineTS) in a local block or a ternary;
+ *  - na sources: ta.bb / ta.bbw (a value on an na bar on TradingView, na in PineTS), ta.kc / ta.kcw (na on
+ *    an na bar on TradingView, a value in PineTS), ta.rci (a value on TradingView, na in PineTS).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -100,6 +119,7 @@ const btcusdtFixture = (title: string, file: string) => {
 
 btcusdtFixture('ta functions with a series length (TradingView parity)', 'varlen-btcusdt.json');
 btcusdtFixture('ta functions in ternaries, and / or, switch, loops and user functions (TradingView parity)', 'ta-contexts-btcusdt.json');
+btcusdtFixture('ta builtins, na sources and series arguments in every position (TradingView parity)', 'ta-coverage-btcusdt.json');
 
 const synthetic = JSON.parse(readFileSync(new URL('./data/tv-synthetic-sources.json', import.meta.url), 'utf8'));
 

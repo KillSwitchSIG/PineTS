@@ -3,10 +3,10 @@
 /**
  * `na` handling in `ta.range`.
  *
- * `ta.range` is NOT `ta.highest - ta.lowest`: those two reset at `na`
- * (tests/namespaces/ta/na-window-semantics.test.ts), while `ta.range` skips `na`
- * entirely. Expected values match TradingView (Sep 2026); three rules explain
- * every cell:
+ * `ta.range` skips `na` entirely, as `ta.highest` / `ta.lowest` also do since
+ * TradingView's change of Oct 9, 2026 (tests/namespaces/ta/na-window-semantics.test.ts),
+ * but it is still not `ta.highest - ta.lowest` on a window of negative values (below).
+ * Expected values match TradingView (Sep 2026); three rules explain every cell:
  *
  *   - The window holds the last `length` NON-na values; an `na` bar is not added,
  *     so the result on an `na` bar repeats the previous one.
