@@ -87,7 +87,7 @@ export function order(context: any) {
         // stop-limit order, the limit price of a limit order) — matching
         // TradingView's backtest accounting.
         const currentPrice = Series.from(context.data.close).get(0);
-        const calculatedQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValue, limitValue, currentPrice));
+        const calculatedQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValue, limitValue, currentPrice), limitValue === undefined);
         // An order smaller than the symbol's minimum quantity is rejected.
         if (calculatedQty <= 0) return undefined;
 

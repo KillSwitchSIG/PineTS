@@ -129,7 +129,7 @@ export function entry(context: any) {
         const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
         const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
 
-        const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValueRounded, limitValueRounded, currentPrice));
+        const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValueRounded, limitValueRounded, currentPrice), limitValueRounded === undefined);
 
         const isReversal = currentSize !== 0 && Math.sign(currentSize) !== dir;
         // An order smaller than the symbol's minimum quantity is rejected.

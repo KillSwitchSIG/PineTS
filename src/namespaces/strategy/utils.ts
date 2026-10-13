@@ -139,7 +139,11 @@ export function computeHeldMargin(context: any, atPrice: number): number {
 /**
  * Calculate order quantity based on strategy configuration
  */
-export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number): number {
+/**
+ * Order quantity. Cash and percent-of-equity orders are sized at the expected fill price, slippage
+ * included when the order would take it (`withSlippage`: market and stop orders, not limits).
+ */
+export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number, withSlippage = true): number {
     const strategy: StrategyState = context.strategy;
 
     // Get qty type and value, calling functions if needed
@@ -163,6 +167,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
     }
 
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    if (withSlippage) fillPrice = applySlippage(context, direction, fillPrice);
     let rawQty: number;
     switch (qtyType) {
         case 'fixed':
@@ -175,10 +180,16 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             break;
 
         case 'percent_of_equity': {
-            // Calculate quantity based on percentage of equity
-            // qty_value=10 means 10% of equity
+            // qty_value = 10 is 10% of equity. The order is sized so that the position AND its
+            // entry commission fit in that amount (TradingView): a percent commission scales the
+            // unit cost, a per-contract one adds to it, a per-order one is taken off the amount.
             const positionValue = (strategy.equity * qtyValue) / 100;
-            rawQty = positionValue / (fillPrice * pointValue);
+            const unitCost = fillPrice * pointValue;
+            const commType = strategy.config.commission_type ?? 'percent';
+            const commValue = Number(strategy.config.commission_value ?? 0) || 0;
+            if (commType === 'cash_per_contract') rawQty = positionValue / (unitCost + commValue);
+            else if (commType === 'cash_per_order') rawQty = (positionValue - commValue) / unitCost;
+            else rawQty = positionValue / (unitCost * (1 + commValue / 100));
             break;
         }
 
