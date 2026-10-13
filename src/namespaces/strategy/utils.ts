@@ -419,7 +419,8 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
         const isReversal = oldSign !== 0 && oldSign !== direction;
         const newOpenQty = isReversal ? Math.max(0, order.qty - Math.abs(oldSize)) : order.qty;
 
-        if (newOpenQty > 0) {
+        // Margin 0 disables the margin model: entries are not checked against equity.
+        if (newOpenQty > 0 && marginPct > 0) {
             const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
             // Equity is already MtM'd at OPEN by markToMarket() at the
             // top of processStrategyOrders, so strategy.equity is the
@@ -1908,6 +1909,9 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
  * close-MC that flattens the position leaves nothing to gate (IC=900k
  * experiment: next-open entry from flat was admitted).
  */
+// TradingView books a margin-call liquidation as a position close, with the reason in the comment.
+const MARGIN_CALL_EXIT_ID = 'Close position order';
+
 export function applyPendingCloseMarginCall(context: any): void {
     const strategy: StrategyState = context.strategy;
     if (!strategy) return;
@@ -1917,8 +1921,8 @@ export function applyPendingCloseMarginCall(context: any): void {
 
     if (strategy.opentrades.length === 0 || Math.sign(strategy.position_size) !== pending.dir) return;
 
-    closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), pending.price, pending.time, {
-        exitId: 'Margin call',
+    closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), applySlippage(context, -pending.dir, pending.price), pending.time, {
+        exitId: MARGIN_CALL_EXIT_ID,
         exitComment: 'Margin call',
     });
 
@@ -1989,6 +1993,8 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     if (positionDir === 0) return;
 
     const marginPct = positionDir === 1 ? (strategy.config.margin_long ?? 100) : (strategy.config.margin_short ?? 100);
+    // Margin 0 disables the margin model: no margin call, even with negative equity.
+    if (!(marginPct > 0)) return;
 
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
@@ -2015,22 +2021,19 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // at price 110,797.38 → 4 × 0.30328) and 0.48244 of another
         // (deficit $10,924.98 at 90,574.00 → 4 × 0.12061).
         const deficit = requiredMarginAtAdverse - equityAtAdverse;
-        // Full-precision cover — no truncation. Verified against the
-        // commission-0 margin oracle (BTCUSDC weekly) where TV's
-        // liquidation qty matches PT's untruncated 4× cover exactly, and
-        // against the BTCUSDC avg_price QA xlsx (TV qty 3.602232 ≈ 7
-        // significant digits). An earlier 5-decimal floor was overfit to
-        // the BTCUSDT margin_calls xlsx where TV's exported quantities
-        // (1.21312, 0.48244) are 7-significant-digit values with trailing
-        // zeros trimmed; the residual there (~$1 equity-basis opacity
-        // inside TV) is sub-dollar on a $530k net and accepted.
+        // The cover is floored to the symbol's quantity step (syminfo.mincontract)
+        // BEFORE the 4× multiplier, so a liquidation is always 4 whole steps per
+        // step of cover (or the whole position). A fixed 5-decimal floor fitted
+        // BTCUSDT (step 0.00001) but not symbols with a finer step, which is why
+        // the step comes from syminfo.
         //
         // The marginPct/100 divisor matters below 100%: TV liquidates
         // 4×deficit/(price·m) — verified exactly on fresh TV captures at
         // margin_long/short = 50 (close-MC investigation, 2026-06-12).
         const marginFrac = marginPct / 100;
-        const coverQty = deficit / (adversePrice * pointValue * marginFrac);
-        const qtyToLiquidate = Math.min(totalQty, 4 * coverQty);
+        // A cover smaller than one step liquidates the whole position.
+        const coverQty = floorQty(context, deficit / (adversePrice * pointValue * marginFrac));
+        const qtyToLiquidate = coverQty > 0 ? Math.min(totalQty, Number((4 * coverQty).toFixed(10))) : totalQty;
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole
@@ -2041,8 +2044,9 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         const frontQty = Math.abs(frontPiece.size);
         const frontEntry = frontPiece.entry_price;
 
-        closePartialPosition(context, qtyToLiquidate, adversePrice, currentTime, {
-            exitId: 'Margin call',
+        // The liquidation is a market order: slippage applies against the position.
+        closePartialPosition(context, qtyToLiquidate, applySlippage(context, -positionDir, adversePrice), currentTime, {
+            exitId: MARGIN_CALL_EXIT_ID,
             exitComment: 'Margin call',
         });
 
