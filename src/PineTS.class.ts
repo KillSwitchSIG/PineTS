@@ -1170,6 +1170,9 @@ export class PineTS {
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
                 applyPendingCloseMarginCall(context);
+                // strategy.close / close_all market orders fill at the open
+                // ahead of entries (see processExitOrders' 'market' phase).
+                processExitOrders(context, 'market');
                 processStrategyOrders(context);
                 // Margin checkpoints along the intra-bar path (TV broker
                 // emulator): first at the OPEN right after entries fill;

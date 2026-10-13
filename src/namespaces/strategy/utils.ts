@@ -1356,7 +1356,21 @@ export function closeMatching(
  *     triggers evaluated against current bar's high/low. Trailing-stop
  *     peak (trade.trail_peak) is updated each bar even when not triggered.
  */
-export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'intrabar'): void {
+/** A market order from `strategy.close` / `strategy.close_all` (an exit with no price leg). */
+export function isMarketCloseOrder(o: Order): boolean {
+    return (
+        (o.category ?? 'entry') === 'exit' &&
+        o.type === 'market' &&
+        o.profit === undefined &&
+        o.loss === undefined &&
+        o.limit === undefined &&
+        o.stop === undefined &&
+        o.trail_price === undefined &&
+        o.trail_points === undefined
+    );
+}
+
+export function processExitOrders(context: any, phase: 'market' | 'open' | 'intrabar' = 'intrabar'): void {
     if (!context.strategy) return;
     const strategy: StrategyState = context.strategy;
     if (strategy.pending_orders.length === 0) return;
@@ -1377,6 +1391,14 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
     //                      bracket's trigger → fill at the open). Brackets
     //                      consumed here never extend to entries filling at
     //                      the same open.
+    //   phase 'market'   — runs BEFORE entry fills. Only market closes from
+    //                      strategy.close / close_all queued on an earlier bar:
+    //                      they fill at the open ahead of entry orders (a
+    //                      limit / stop entry fills later on the path; a
+    //                      market entry fills at the same open, so one queued
+    //                      BEFORE the close keeps precedence). TV: a close
+    //                      followed by a reversing entry exits at the open
+    //                      under the close's id and comment (#316).
     //   phase 'intrabar' — runs AFTER entry fills. Everything else:
     //                      market closes, intra-bar crossings, trail, and
     //                      gap-fills for trades that ATTACHED at this bar's
@@ -1393,6 +1415,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
     for (const order of strategy.pending_orders) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
+        if (phase === 'market' && !isMarketCloseOrder(order)) continue;
 
         // Gather matching open trades (from_entry filter; '' = all).
         // For market closes from strategy.close_all() / strategy.close(id),
@@ -1409,7 +1432,7 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
             matching = matching.filter((t) => snapshot.has(t.id));
         }
         if (matching.length === 0) {
-            // Nothing to exit. In the pre-entry phase the order may be
+            // Nothing to exit. In the pre-entry phases the order may be
             // WAITING on an entry that fills at this bar's open (TV: exit
             // orders placed before their entry wait for it) — leave it
             // pending. After entries have filled (intrabar phase), an
@@ -1422,21 +1445,21 @@ export function processExitOrders(context: any, phase: 'open' | 'intrabar' = 'in
         const matchingDir = Math.sign(matching[0].size); // direction of the position to close
 
         // ---- Market exits from close() / close_all() ----
-        if (
-            order.type === 'market' &&
-            order.profit === undefined &&
-            order.loss === undefined &&
-            order.limit === undefined &&
-            order.stop === undefined &&
-            order.trail_price === undefined &&
-            order.trail_points === undefined
-        ) {
-            // Market closes fill in the intrabar phase (after entries) —
-            // their interplay with reversal entries is governed by the
-            // _intended_trade_ids snapshot above.
+        if (isMarketCloseOrder(order)) {
             if (phase === 'open') continue;
             // Skip orders placed on the current bar — they fill on the next bar's open.
             if (order.bar >= context.idx) continue;
+            if (phase === 'market') {
+                // `immediately` closes are handled at their own bar's close.
+                if (order.immediately) continue;
+                // A market entry queued before this close fills first at the same open; the
+                // close then fills in the intrabar phase (cancelled if that entry reversed it).
+                const queuedAt = strategy.pending_orders.indexOf(order);
+                const earlierMarketEntry = strategy.pending_orders
+                    .slice(0, queuedAt)
+                    .some((o) => o.status === 'pending' && (o.category ?? 'entry') === 'entry' && o.type === 'market' && o.bar < context.idx);
+                if (earlierMarketEntry) continue;
+            }
 
             // Determine fill price; immediately=true (when supported) would fire
             // at current close; default is current bar's open.
