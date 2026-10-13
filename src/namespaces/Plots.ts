@@ -66,13 +66,13 @@ const FILL_SIGNATURE = [
 
 //prettier-ignore
 const GRADIENT_FILL_SIGNATURE = [
-    'plot1', 'plot2', 'top_value', 'bottom_value', 'top_color', 'bottom_color', 'title', 'editable', 'show_last', 'fillgaps', 'display',
+    'plot1', 'plot2', 'top_value', 'bottom_value', 'top_color', 'bottom_color', 'title', 'display', 'fillgaps', 'editable',
 ];
 
 //prettier-ignore
 const GRADIENT_FILL_ARGS_TYPES = {
     plot1: 'object', plot2: 'object', top_value: 'number', bottom_value: 'number', top_color: 'color', bottom_color: 'color',
-    title: 'string', editable: 'boolean', show_last: 'number', fillgaps: 'boolean', display: 'string',
+    title: 'string', display: 'string', fillgaps: 'boolean', editable: 'boolean',
 };
 
 const GRADIENT_FILL_KEYS = ['top_value', 'bottom_value', 'top_color', 'bottom_color'];
@@ -508,7 +508,7 @@ export class FillHelper {
 
         if (isGradientFill) {
             const _parsed = parseArgsForPineParams<any>(args, GRADIENT_FILL_SIGNATURE, GRADIENT_FILL_ARGS_TYPES);
-            const { plot1, plot2, editable, show_last, fillgaps, display } = _parsed;
+            const { plot1, plot2, editable, fillgaps, display } = _parsed;
             const top_value = Series.from(_parsed.top_value).get(0);
             const bottom_value = Series.from(_parsed.bottom_value).get(0);
             const top_color = Series.from(_parsed.top_color).get(0);
@@ -532,7 +532,7 @@ export class FillHelper {
                     options: {
                         plot1: p1Key,
                         plot2: p2Key,
-                        editable, show_last, fillgaps, display,
+                        editable, fillgaps, display,
                         style: 'fill',
                         gradient: true,
                     },
