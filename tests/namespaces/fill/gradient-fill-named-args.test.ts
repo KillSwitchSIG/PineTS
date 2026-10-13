@@ -58,6 +58,15 @@ fill(a, b, 100, 90, color.green, color.red, title="Grad2")`);
         expect(plots['Hidden'].options.fillgaps).toBe(true);
     });
 
+    it('positional args after the title follow the v6 gradient order (display, fillgaps, editable)', async () => {
+        const plots = await plotsOf(`fill(a, b, 100, 90, color.green, color.red, "Pos", display.none, true, false)`);
+        expect(plots['Pos'].options.gradient).toBe(true);
+        expect(plots['Pos'].options.display).toBe('none');
+        expect(plots['Pos'].options.fillgaps).toBe(true);
+        expect(plots['Pos'].options.editable).toBe(false);
+        expect(plots['Pos'].options).not.toHaveProperty('show_last');
+    });
+
     it('all-named gradient and plain fills keep working', async () => {
         const plots = await plotsOf(`fill(a, b, top_value=100, bottom_value=90, top_color=color.green, bottom_color=color.red, title="AllNamed")
 fill(a, b, color.red, title="Plain")`);
