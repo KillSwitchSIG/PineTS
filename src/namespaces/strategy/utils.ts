@@ -381,7 +381,19 @@ export function processStrategyOrders(context: any): void {
                 break;
         }
 
-        if (shouldFill) fillEntryOrder(context, order, fillPrice, currentTime, openPrice);
+        if (shouldFill) {
+            fillEntryOrder(context, order, fillPrice, currentTime, openPrice);
+            // A limit / stop fill at its level inside the bar: tag the trades it opened, so their exits
+            // on this bar only see the path after the fill (see entryBarPathExit).
+            if ((order.status as Order['status']) === 'filled' && order.type !== 'market' && fillPrice !== openPrice) {
+                const type: 'limit' | 'stop' = order.type === 'limit' || (order.type === 'stop-limit' && fillPrice === order.limit) ? 'limit' : 'stop';
+                for (const t of strategy.opentrades) {
+                    if (t.entry_id === order.id && t.entry_bar_index === context.idx && !t._intrabarEntry) {
+                        t._intrabarEntry = { bar: context.idx, level: fillPrice, type, dir: parseDirection(order.direction) };
+                    }
+                }
+            }
+        }
     }
 
     // Remove filled and cancelled orders
@@ -1368,6 +1380,52 @@ export function closeMatching(
  *     triggers evaluated against current bar's high/low. Trailing-stop
  *     peak (trade.trail_peak) is updated each bar even when not triggered.
  */
+/**
+ * Exit of a trade that a limit / stop entry filled inside the current bar (TradingView broker
+ * emulator): the bar moves open → nearer extreme → farther extreme → close, the entry fills where
+ * that path first reaches its level, and only the path after it can trigger the exit legs. A leg
+ * already breached at the fill fills there, at the fill price; otherwise the first leg the rest of
+ * the path reaches fills at its own price. Returns null when no leg is reached on this bar, and
+ * undefined when the fill cannot be placed on the path (the caller then uses the whole bar).
+ */
+function entryBarPathExit(
+    entry: { level: number; type: 'limit' | 'stop'; dir: number },
+    tp: number | undefined,
+    sl: number | undefined,
+    isLong: boolean,
+    bar: { open: number; high: number; low: number; close: number },
+    limitSlack: number,
+): { kind: 'profit' | 'loss'; price: number } | null | undefined {
+    const { open, high, low, close } = bar;
+    const path = Math.abs(high - open) <= Math.abs(open - low) ? [open, high, low, close] : [open, low, high, close];
+    // A buy limit and a sell stop fill on a falling move, a buy stop and a sell limit on a rising one.
+    const falling = (entry.type === 'limit') === (entry.dir === 1);
+    const at = entry.level;
+    let segment = -1;
+    for (let i = 0; i < 3; i++) {
+        const a = path[i], b = path[i + 1];
+        if (falling ? a >= at && b <= at : a <= at && b >= at) {
+            segment = i;
+            break;
+        }
+    }
+    if (segment < 0) return undefined;
+    if (tp !== undefined && (isLong ? at >= tp : at <= tp)) return { kind: 'profit', price: at };
+    if (sl !== undefined && (isLong ? at <= sl : at >= sl)) return { kind: 'loss', price: at };
+    const rest = [at, ...path.slice(segment + 1)];
+    for (let i = 0; i + 1 < rest.length; i++) {
+        const a = rest[i], b = rest[i + 1];
+        if (b > a) {
+            if (isLong && tp !== undefined && b >= tp + limitSlack) return { kind: 'profit', price: tp };
+            if (!isLong && sl !== undefined && b >= sl) return { kind: 'loss', price: sl };
+        } else if (b < a) {
+            if (isLong && sl !== undefined && b <= sl) return { kind: 'loss', price: sl };
+            if (!isLong && tp !== undefined && b <= tp - limitSlack) return { kind: 'profit', price: tp };
+        }
+    }
+    return null;
+}
+
 /** A market order from `strategy.close` / `strategy.close_all` (an exit with no price leg). */
 export function isMarketCloseOrder(o: Order): boolean {
     return (
@@ -1447,9 +1505,18 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             // Nothing to exit. In the pre-entry phases the order may be
             // WAITING on an entry that fills at this bar's open (TV: exit
             // orders placed before their entry wait for it) — leave it
-            // pending. After entries have filled (intrabar phase), an
-            // exit with no matching trades is dead — clear it.
-            if (phase === 'intrabar') order.status = 'cancelled';
+            // pending. After entries have filled (intrabar phase), check
+            // if there's still a pending entry order for this exit's
+            // from_entry — if so, keep the exit waiting; otherwise it's
+            // orphaned and should be cancelled.
+            if (phase === 'intrabar') {
+                const hasPendingEntry = order.from_entry
+                    ? strategy.pending_orders.some(
+                          (o) => o.status === 'pending' && (o.category ?? 'entry') === 'entry' && o.id === order.from_entry
+                      )
+                    : false;
+                if (!hasPendingEntry) order.status = 'cancelled';
+            }
             continue;
         }
 
@@ -1678,6 +1745,20 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             let sl = absSl;
             if (sl === undefined && order.loss !== undefined) {
                 sl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
+            }
+
+            // A trade a limit / stop entry opened inside this bar: only the path after the fill counts.
+            // Its absolute legs are taken as given (a leg on the wrong side of the fill exits at the
+            // fill), unless the exit was attached to a reversal (see the stale-attachment drop above).
+            const intrabar = phase === 'intrabar' && t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
+            if (intrabar && !mcLocked) {
+                const pathTp = order._attachedAtReversal ? tp : (order.limit ?? tp);
+                const pathSl = order._attachedAtReversal ? sl : (order.stop ?? sl);
+                const hit = entryBarPathExit(intrabar, pathTp, pathSl, isLong, { open: openPrice, high: highPrice, low: lowPrice, close: closePrice }, limitSlack);
+                if (hit !== undefined) {
+                    if (hit) (hit.kind === 'profit' ? tpEvents : slEvents).push({ qty: tQty, price: hit.price, kind: hit.kind, tradeId: t.id });
+                    continue;
+                }
             }
 
             // In the pre-entry 'open' phase only GAP conditions count (the

@@ -82,6 +82,9 @@ export interface Trade {
      * before an older lot's (TV ledger convention).
      */
     _bracket_entry?: number;
+    // Set when a limit / stop entry filled this trade at a price level inside the bar (not at the
+    // open): exits on that bar only see the price path after the fill.
+    _intrabarEntry?: { bar: number; level: number; type: 'limit' | 'stop'; dir: number };
 }
 
 /**
