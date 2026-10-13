@@ -1,5 +1,18 @@
 # Change Log
 
+## [0.11.1-atlas.1] - 2026-10-13 - Fork fixes (KillSwitchSIG/PineTS, branch atlas-fixes)
+
+Bug fixes found while embedding PineTS in a charting app, rebased onto 0.11.1. One commit each, with a regression test. The earlier fork fixes for provider errors, months in timeframes and the `request.*` na stubs are upstream now (#359, #365, #364).
+
+### Fixed
+
+- **Untitled `bgcolor()` / `barcolor()` / `plotchar()` / `plotshape()` / `plotarrow()` / `plotbar()` / `plotcandle()` shared the plot key `"plot"`**, interleaving their data with the first call's options. They now get call-site keys in their own key space (`"bgcolor#0"`, …); titled keys are unchanged. Test: `tests/namespaces/plot/untitled-callsite-keys.test.ts`.
+- **Array data sources had no symbol info** (`syminfo.tickerid` undefined), and a `request.security` of another symbol or timeframe silently returned the array's own candles. `syminfo` now defaults from the ticker argument (UTC, mintick 0.01), and requests an array can't serve throw `request.security needs a market data provider …`. Test: `tests/core/array-source-syminfo.test.ts`.
+- **A secondary context without a slice re-transpiled the source, and crashed after `runPretranspiled()`** (`run(null)`); secondaries also ignored input overrides. They now run the call site's slice or the parent's transpiled function, with the parent's inputs. Test: `tests/namespaces/request-secondary-script.test.ts`.
+- **A function holding a `request.security`, called more than once, crashed** (`f(r) => request.security(…, r, close)` + `plot(f("240"))` + `plot(f("W"))`): the slice stopped at the function's first invocation. It now runs through the last one, falls back to the whole script when a slice doesn't evaluate the expression, and a request the secondary never evaluates is `na` instead of a crash. Test: `tests/namespaces/request-fn-multi-call.test.ts`.
+- **A gradient `fill()` lost named arguments**: `title=`, `display=`, `fillgaps=`, and positional values with named colours weren't recognised as a gradient; the gradient signature now follows the v6 manual (`title, display, fillgaps, editable`). Test: `tests/namespaces/fill/gradient-fill-named-args.test.ts`.
+- **Stocks and funds were sized in fractional shares when the provider reports no `syminfo.mincontract`** (the quantity step fell back to 0.000001). TradingView's broker emulator trades whole shares for `syminfo.type` `"stock"` / `"fund"`: the step now falls back to 1 there, so `percent_of_equity` / `cash` / explicit `qty` and `qty_percent` partial exits are floored to whole shares, and an entry that floors to 0 places no order. A reported `mincontract` is still the step. Test: `tests/namespaces/strategy/whole-shares.test.ts`.
+
 ## [0.11.1] - 2026-10-13 - Resource Limits, Closed-World Verification & Strategy / Provider Fixes
 
 ### Security
