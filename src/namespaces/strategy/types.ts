@@ -179,6 +179,8 @@ export interface Order {
     _stopTriggered?: boolean;
     // Internal: bar on which this entry waits for the exits reached before it on the bar's path.
     _deferredPastExits?: number;
+    // Internal: the market order of a strategy.risk close-out (not checked against margin).
+    _risk?: boolean;
 
     // Internal: snapshot of open trade IDs at the moment strategy.close_all()
     // or strategy.close(id) was called. TV binds `close_all` / `close(id)` to

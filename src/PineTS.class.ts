@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processDeferredEntries, exitBeforeAdverseExtreme, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processStrategyOrders, processDeferredEntries, exitBeforeAdverseExtreme, riskStartBar, riskEndOfBarFills, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1169,6 +1169,7 @@ export class PineTS {
                 // a reversal queued at that close (qty frozen at queue
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
+                riskStartBar(context);
                 applyPendingCloseMarginCall(context);
                 // strategy.close / close_all market orders fill at the open
                 // ahead of entries (see processExitOrders' 'market' phase).
@@ -1185,10 +1186,18 @@ export class PineTS {
                 processMarginCall(context, 'open');
                 // An exit reached before the adverse extreme fills before that margin check.
                 const adverseFirst = isAdverseFirstBar(context) && !exitBeforeAdverseExtreme(context);
-                if (adverseFirst) processMarginCall(context, 'extreme');
+                // strategy.risk.max_intraday_loss is checked at the adverse extreme before the
+                // margin is (TV closes under the risk rule, then has nothing to margin-call).
+                if (adverseFirst) {
+                    riskEndOfBarFills(context);
+                    processMarginCall(context, 'extreme');
+                }
                 processExitOrders(context, 'intrabar');
                 processDeferredEntries(context);
-                if (!adverseFirst) processMarginCall(context, 'extreme');
+                if (!adverseFirst) {
+                    riskEndOfBarFills(context);
+                    processMarginCall(context, 'extreme');
+                }
                 // Latch max_drawdown / max_runup ONCE at the end of the bar so
                 // trades closed mid-bar by TP / SL contribute their realized
                 // P&L (not phantom intra-bar excursions against the raw H/L).
