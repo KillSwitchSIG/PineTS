@@ -442,6 +442,34 @@ export function exitBeforeAdverseExtreme(context: any): boolean {
 }
 
 /**
+ * Where on the path the first stop / limit leg (absolute or in ticks from each trade's entry) of one
+ * exit order is reached; Infinity when none is on this bar. Market closes and trailing legs: 0.
+ */
+function exitFirstLegAt(context: any, o: Order, path: number[]): number {
+    if (isMarketCloseOrder(o)) return 0;
+    const strategy: StrategyState = context.strategy;
+    const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    const slack = limitFillSlack(context);
+    let first = Infinity;
+    for (const t of strategy.opentrades) {
+        if (o.from_entry && t.entry_id !== o.from_entry) continue;
+        const dir = Math.sign(t.size);
+        const entry = t._bracket_entry ?? t.entry_price;
+        const tp = o.limit ?? (o.profit !== undefined ? tickLevel(entry, dir * o.profit, mintick) : undefined);
+        const sl = o.stop ?? (o.loss !== undefined ? tickLevel(entry, -dir * o.loss, mintick) : undefined);
+        if (tp !== undefined) first = Math.min(first, pathPosition(path, tp + dir * slack, dir === 1) ?? Infinity);
+        if (sl !== undefined) first = Math.min(first, pathPosition(path, sl, dir !== 1) ?? Infinity);
+        if (o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
+            const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
+            const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
+            const walk = walkTrail(path, { at: 0, price: path[0] }, { ...state, armPrice, offset: o.trail_offset, dir, mintick });
+            if (walk.fill) first = Math.min(first, walk.fill.at);
+        }
+    }
+    return first;
+}
+
+/**
  * Entries held back by processStrategyOrders because an exit of the position they reverse is
  * reached first on the bar's path: they fill after the intrabar exits, from what those leave. The
  * trades they open then meet their own exits on the rest of the path (TV: a long's stop, then a
@@ -840,21 +868,19 @@ function fillExitAtClose(context: any, order: Order, closePrice: number, current
     const matching = strategy.opentrades.filter((t) => !order.from_entry || t.entry_id === order.from_entry);
     if (matching.length === 0) return;
     const dir = Math.sign(matching[0].size);
-    const entryQty = matching.reduce((sum, t) => sum + (t._entry_qty ?? Math.abs(t.size)), 0);
-    let cap = Infinity;
-    if (order.qty && order.qty > 0) cap = order.qty;
-    else if (order.qty_percent && order.qty_percent > 0) cap = partialCloseQty(context, entryQty, order.qty_percent);
+    const capacity = exitCapacity(context, order, matching);
+    let cap = capacity.total;
     let closed = false;
     for (const t of matching) {
         if (cap <= 1e-9) break;
-        if (t._exits_filled?.has(order.id)) continue;
+        if (t._exits_filled?.has(order.id) || !((capacity.perTrade.get(t) ?? 0) > 1e-9)) continue;
         const entry = t._bracket_entry ?? t.entry_price;
         const tp = order.limit ?? (order.profit !== undefined ? entry + dir * order.profit * mintick : undefined);
         const sl = order.stop ?? (order.loss !== undefined ? entry - dir * order.loss * mintick : undefined);
         const slHit = sl !== undefined && (dir === 1 ? closePrice <= sl : closePrice >= sl);
         const tpHit = !slHit && tp !== undefined && (dir === 1 ? closePrice >= tp : closePrice <= tp);
         if (!slHit && !tpHit) continue;
-        const qty = Math.min(Math.abs(t.size), cap);
+        const qty = Math.min(capacity.perTrade.get(t) ?? 0, cap);
         const kind: 'profit' | 'loss' = slHit ? 'loss' : 'profit';
         const fillPrice = kind === 'loss' ? applySlippage(context, -dir, closePrice) : closePrice;
         const comment = kind === 'profit' ? (order.comment_profit ?? order.comment) : (order.comment_loss ?? order.comment);
@@ -1233,6 +1259,11 @@ function executeOrder(context: any, order: Order, fillPrice: number, fillTime: n
         // TWO separate lots (each with its own exit bracket and ledger
         // row — xlsx 2021-10-02: longs 5 + 0.263108 at the same fill).
         if (remainingQty > 0) {
+            // The reversed position takes its exits without from_entry with it, as when it goes
+            // flat: the new position gets the exits placed for it (TV).
+            for (const o of strategy.pending_orders) {
+                if (o.status === 'pending' && (o.category ?? 'entry') === 'exit' && !o.from_entry && o._placedWithPosition && o._placedDir === oldSign) o.status = 'cancelled';
+            }
             const baseQty = (order as any)._base_qty;
             if (baseQty !== undefined && remainingQty > baseQty + 1e-9) {
                 openTrade(context, order.id, direction, baseQty, fillPrice, fillTime, order.comment, baseQty / order.qty);
@@ -1781,6 +1812,47 @@ function entryBarPathExit(
     return null;
 }
 
+/**
+ * How much of `matching` (the open trades it applies to) a strategy.exit may close. Exits share an
+ * entry's quantity in the order they were placed (TradingView): each takes its `qty`, or its
+ * `qty_percent` of the entry quantity, or all of it without either, out of what the exits placed
+ * before it and still working have not taken. A 50% target placed before a qty-less stop leaves
+ * the stop half the position; the qty-less stop placed first takes all of it and the target
+ * never fills; 60% + 60% gives the second 40%; on whole contracts 50% of 1 takes the contract.
+ */
+function exitCapacity(context: any, order: Order, matching: Trade[]): { total: number; perTrade: Map<Trade, number> } {
+    const strategy: StrategyState = context.strategy;
+    // What exit `o` takes of each trade it applies to: qty_percent of that trade's entry quantity,
+    // an absolute qty spread over the trades oldest first, or all of each without either.
+    const shares = (o: Order, ts: Trade[]): Map<Trade, number> => {
+        const m = new Map<Trade, number>();
+        let left = o.qty && o.qty > 0 ? o.qty : Infinity;
+        for (const t of ts) {
+            const want = o.qty_percent && o.qty_percent > 0 && !(o.qty && o.qty > 0) ? partialCloseQty(context, t._entry_qty ?? Math.abs(t.size), o.qty_percent) : left;
+            const take = Math.min(want, Math.abs(t.size));
+            m.set(t, take);
+            if (o.qty && o.qty > 0) left -= take;
+        }
+        return m;
+    };
+    const free = new Map<Trade, number>(matching.map((t) => [t, Math.abs(t.size)]));
+    const earlier = strategy.pending_orders
+        .filter((o) => o !== order && o.status === 'pending' && (o.category ?? 'entry') === 'exit' && !isMarketCloseOrder(o) && (o._seq ?? Infinity) < (order._seq ?? Infinity))
+        .sort((a, b) => (a._seq ?? 0) - (b._seq ?? 0));
+    for (const o of earlier) {
+        const its = matching.filter((t) => (!o.from_entry || t.entry_id === o.from_entry) && !t._exits_filled?.has(o.id));
+        for (const [t, q] of shares(o, its)) free.set(t, Math.max(0, (free.get(t) ?? 0) - q));
+    }
+    const perTrade = new Map<Trade, number>();
+    let total = 0;
+    for (const [t, q] of shares(order, matching)) {
+        const c = Math.min(q, free.get(t) ?? 0);
+        perTrade.set(t, c);
+        total += c;
+    }
+    return { total, perTrade };
+}
+
 /** A market order from `strategy.close` / `strategy.close_all` (an exit with no price leg). */
 export function isMarketCloseOrder(o: Order): boolean {
     return (
@@ -1837,7 +1909,20 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
     // order surviving to intra-bar crossing closes same-bar entries too
     // (2020-12-17), and a waiting order attaches to a reversal entry and
     // gap-exits it at its own fill price (2021-09-08).
-    for (const order of strategy.pending_orders) {
+    //
+    // Exit orders are taken in the order the bar's path reaches their first stop / limit leg: a
+    // second exit's stop reached before the first exit's target fills first (TV).
+    const exitPath = barPath(
+        Series.from(context.data.open).get(0),
+        Series.from(context.data.high).get(0),
+        Series.from(context.data.low).get(0),
+        Series.from(context.data.close).get(0),
+    );
+    const ordered = strategy.pending_orders
+        .map((o, i) => ({ o, i, at: phase === 'intrabar' && (o.category ?? 'entry') === 'exit' ? exitFirstLegAt(context, o, exitPath) : 0 }))
+        .sort((a, b) => a.at - b.at || a.i - b.i)
+        .map((x) => x.o);
+    for (const order of ordered) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
         if (phase === 'market' && !isMarketCloseOrder(order)) continue;
@@ -2054,12 +2139,15 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         const mcLock = (strategy as any)._mc_exit_lock;
         const mcLocked = mcLock && mcLock.bar === context.idx;
 
+        // What this exit may close of each trade, after the exits placed before it.
+        const capacity = exitCapacity(context, order, matching);
         for (const t of matching) {
             if (mcLocked && t.id !== mcLock.tradeId) continue;
             // Tick legs compute from the lot's PHYSICAL entry — immutable
             // under FIFO ledger pairing (see closePartialPosition).
             const entry = t._bracket_entry ?? t.entry_price;
-            const tQty = Math.abs(t.size);
+            const tQty = capacity.perTrade.get(t) ?? 0;
+            if (!(tQty > 1e-9)) continue;
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
                 tp = tickLevel(entry, isLong ? order.profit : -order.profit, mintick);
@@ -2180,7 +2268,8 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
                     order.trail_price ?? tickLevel(t._bracket_entry ?? t.entry_price, isLong ? (order.trail_points as number) : -(order.trail_points as number), mintick);
                 const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick });
                 states[t.id] = { armed: fired.armed, peak: fired.peak };
-                if (fired.fill) trailEvents.push({ qty: Math.abs(t.size), price: fired.fill.price, kind: 'trailing', at: fired.fill.at, tradeId: t.id });
+                const tQty = capacity.perTrade.get(t) ?? 0;
+                if (fired.fill && tQty > 1e-9) trailEvents.push({ qty: tQty, price: fired.fill.price, kind: 'trailing', at: fired.fill.at, tradeId: t.id });
             }
         }
 
@@ -2197,14 +2286,9 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         ).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
 
         if (events.length > 0) {
-            // qty / qty_percent caps apply to the TOTAL closed by this order.
-            let capRemaining = matchingQty;
-            if (order.qty && order.qty > 0) capRemaining = Math.min(order.qty, matchingQty);
-            else if (order.qty_percent && order.qty_percent > 0) {
-                // qty_percent of the trades' entry quantity (two 25% exits on 8 contracts close 2 each)
-                const entryQty = matching.reduce((sum, t) => sum + (t._entry_qty ?? Math.abs(t.size)), 0);
-                capRemaining = Math.min(matchingQty, partialCloseQty(context, entryQty, order.qty_percent));
-            }
+            // qty / qty_percent caps apply to the TOTAL closed by this order, after what the exits
+            // placed before it reserve.
+            let capRemaining = capacity.total;
 
             const remainingMatchingQty = () =>
                 strategy.opentrades.filter((t) => !order.from_entry || t.entry_id === order.from_entry).reduce((sum, t) => sum + Math.abs(t.size), 0);
