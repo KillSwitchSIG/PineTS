@@ -72,9 +72,12 @@ export function close(context: any) {
                 o.trail_price !== undefined ||
                 o.trail_points !== undefined);
 
+        // A partial close (qty / qty_percent) leaves them working: the rest of the trade keeps its
+        // exits (TV: a 50% target fills on the bar after strategy.close(qty_percent = 50) filled).
         const pending = context.strategy.pending_orders;
+        const partial = (qty !== undefined && Number(qty) > 0) || (qtyPercent !== undefined && Number(qtyPercent) > 0 && Number(qtyPercent) < 100);
         for (const o of pending) {
-            if (isConditionalExit(o) && (o.from_entry ?? '') === targetId && o.status === 'pending') {
+            if (!partial && isConditionalExit(o) && (o.from_entry ?? '') === targetId && o.status === 'pending') {
                 o.status = 'cancelled';
             }
         }

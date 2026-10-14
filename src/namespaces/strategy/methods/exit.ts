@@ -201,6 +201,7 @@ export function exit(context: any) {
             // Was a position open when this exit was placed? Such an order belongs to THAT position and dies with it
             // (see processExitOrders); an exit placed while flat waits for its entry, as on TradingView.
             _placedWithPosition: context.strategy.opentrades.length > 0,
+            _placedDir: Math.sign(context.strategy.position_size),
         };
 
         // Trail state carry-over: each trade's armed flag and running peak are
@@ -212,6 +213,13 @@ export function exit(context: any) {
         // (trail_points, trail_offset, limit, stop, etc.) are refreshed.
         const trails = replaced.find((o) => o._trailByTrade);
         if (trails) order._trailByTrade = { ...trails._trailByTrade };
+        // Placement order decides which exit's quantity is reserved first (see exitCapacity); a
+        // re-call keeps the place of the exit it replaces.
+        const strat = context.strategy as any;
+        const seqs: Map<string, number> = (strat._exit_seqs ??= new Map());
+        const seqKey = `${exitId}\u0000${fromEntryId}`;
+        if (!seqs.has(seqKey)) seqs.set(seqKey, seqs.size + 1);
+        order._seq = seqs.get(seqKey);
         list.push(order);
     };
 }

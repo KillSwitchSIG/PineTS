@@ -171,6 +171,8 @@ export interface Order {
     // levels are then never dropped as wrong-sided).
     _coversOpenTrade?: boolean;
     _placedWithPosition?: boolean;   // placed while a position was open: cancelled when that position goes flat
+    _seq?: number;                   // strategy.exit placement order (kept by re-calls)
+    _placedDir?: number;             // direction of the position open when the exit was placed
     // Internal: stop-limit entry whose stop has been reached; it now works as a limit order.
     _stopTriggered?: boolean;
     // Internal: bar on which this entry waits for the exits reached before it on the bar's path.
