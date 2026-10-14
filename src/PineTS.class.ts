@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processDeferredEntries, exitBeforeAdverseExtreme, riskStartBar, riskEndOfBarFills, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processBarOrders, barPath, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1128,6 +1128,68 @@ export class PineTS {
     }
 
     /**
+     * The broker's fills on a bar of a `calc_on_order_fills` strategy (TradingView, historical bars):
+     *   - the bar is walked point by point along its path (open, nearer extreme, farther extreme,
+     *     close); a fill between two points belongs to the later one;
+     *   - after the points with fills (other than the close) the script runs again, on the complete
+     *     bar, with the broker state at that point. Its orders work from that point on: a market order
+     *     fills at that point's price, limit / stop / exit legs on the rest of the path. Its plots,
+     *     drawings and variables are discarded (`var` is rolled back);
+     *   - the run after a fill at the close is the bar's normal run, which follows this method.
+     * Each path segment is given to the broker as a bar of its own, opening at the segment's start.
+     * @private
+     */
+    private async _processBarWithOrderFills(context: Context, transpiledFn: Function): Promise<void> {
+        const strategy: any = context.strategy;
+        const d: any = context.data;
+        const last = d.close.data.length - 1;
+        const real = { open: d.open.data[last], high: d.high.data[last], low: d.low.data[last], close: d.close.data[last] };
+        const setBar = (open: number, high: number, low: number, close: number) => {
+            d.open.data[last] = open;
+            d.high.data[last] = high;
+            d.low.data[last] = low;
+            d.close.data[last] = close;
+        };
+        const path = barPath(real.open, real.high, real.low, real.close);
+        let snapshot: any = null;
+
+        for (let k = 0; k < path.length; k++) {
+            const from = k === 0 ? path[0] : path[k - 1];
+            const to = path[k];
+            setBar(from, Math.max(from, to), Math.min(from, to), to);
+            const fills = strategy._fillCount ?? 0;
+            processBarOrders(context);
+            // A trade entered inside this segment starts its exit path there; later segments are whole.
+            for (const t of strategy.opentrades) if (t._intrabarEntry?.bar === context.idx) t._intrabarEntry = undefined;
+            if (k === path.length - 1 || (strategy._fillCount ?? 0) === fills) continue;
+
+            setBar(real.open, real.high, real.low, real.close);
+            if (!snapshot) {
+                snapshot = this._snapshotVarState(context);
+                snapshot.strategy = null;
+            }
+            const plotLengths = new Map<string, number>(Object.entries(context.plots ?? {}).map(([key, p]: [string, any]) => [key, p?.data?.length ?? 0]));
+            const pending = new Set(strategy.pending_orders);
+            context._execTick = (context._execTick || 0) + 1;
+            // The market is at this point of the bar: order levels snap to the tick grid away from it.
+            (context as any)._fillPointPrice = to;
+            await transpiledFn(context);
+            (context as any)._fillPointPrice = undefined;
+            // Orders placed now work from this point of the bar on.
+            for (const o of strategy.pending_orders) if (!pending.has(o) && o.bar === context.idx) o.bar = context.idx - 1;
+            for (const key of Object.keys(context.plots ?? {})) {
+                const len = plotLengths.get(key);
+                if (len === undefined) delete context.plots[key];
+                else if (context.plots[key]?.data?.length > len) context.plots[key].data.length = len;
+            }
+            context.rollbackDrawings(context.idx);
+            this._restoreVarState(context, snapshot);
+        }
+        setBar(real.open, real.high, real.low, real.close);
+        if (snapshot) context._execTick = (context._execTick || 0) + 1;
+    }
+
+    /**
      * Execute iterations from startIdx to endIdx, updating the context
      * @private
      */
@@ -1171,34 +1233,8 @@ export class PineTS {
                 // does.
                 riskStartBar(context);
                 applyPendingCloseMarginCall(context);
-                // strategy.close / close_all market orders fill at the open
-                // ahead of entries (see processExitOrders' 'market' phase).
-                processExitOrders(context, 'market');
-                processStrategyOrders(context);
-                // Margin checkpoints along the intra-bar path (TV broker
-                // emulator): first at the OPEN right after entries fill;
-                // then at the adverse extreme — BEFORE exit fills when the
-                // bar's first move is adverse for the position (the
-                // extreme precedes the favorable exits on the path), AFTER
-                // them otherwise (favorable exits free margin first). The
-                // 'extreme' checkpoint may schedule a deferred second
-                // margin call at this bar's close (phantom re-check).
-                processMarginCall(context, 'open');
-                // An exit reached before the adverse extreme fills before that margin check.
-                const adverseFirst = isAdverseFirstBar(context) && !exitBeforeAdverseExtreme(context);
-                // strategy.risk.max_intraday_loss is checked at the adverse extreme before the
-                // margin is (TV closes under the risk rule, then has nothing to margin-call).
-                if (adverseFirst) {
-                    riskEndOfBarFills(context);
-                    processMarginCall(context, 'extreme');
-                }
-                processExitOrders(context, 'intrabar');
-                processDeferredEntries(context);
-                processMarginCall(context, 'favorable');
-                if (!adverseFirst) {
-                    riskEndOfBarFills(context);
-                    processMarginCall(context, 'extreme');
-                }
+                if (context.strategy.config?.calc_on_order_fills) await this._processBarWithOrderFills(context, transpiledFn);
+                else processBarOrders(context);
                 // Latch max_drawdown / max_runup ONCE at the end of the bar so
                 // trades closed mid-bar by TP / SL contribute their realized
                 // P&L (not phantom intra-bar excursions against the raw H/L).

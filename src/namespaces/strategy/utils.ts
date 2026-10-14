@@ -296,7 +296,7 @@ export function partialCloseQty(context: any, positionQty: number, percent: numb
  * Process pending orders and execute them
  */
 /** The bar's assumed intra-bar path (TV broker emulator): open → nearer extreme → farther extreme → close. */
-function barPath(open: number, high: number, low: number, close: number): number[] {
+export function barPath(open: number, high: number, low: number, close: number): number[] {
     return Math.abs(high - open) <= Math.abs(open - low) ? [open, high, low, close] : [open, low, high, close];
 }
 
@@ -1172,6 +1172,9 @@ export function riskStartBar(context: any): void {
 /** After an order filled at `price`: filled-order count, realized drawdown, intraday loss. */
 export function riskAfterFill(context: any, price: number): void {
     const strategy: StrategyState = context.strategy;
+    // Order fills (entries, exits, closes; not margin calls or risk close-outs): calc_on_order_fills
+    // runs the script again after the bar points where this count moved.
+    if (strategy) (strategy as any)._fillCount = ((strategy as any)._fillCount ?? 0) + 1;
     const rules = strategy?.risk_rules;
     if (!rules || Object.keys(rules).length === 0) return;
     const st = riskState(context);
@@ -2774,6 +2777,38 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         return true;
     }
     return false;
+}
+
+/**
+ * The broker's fills on the bar held in context.data (before the script runs): closes and entries
+ * at the open, then the margin checkpoints and the intrabar exits along the bar's path.
+ */
+export function processBarOrders(context: any): void {
+    // strategy.close / close_all market orders fill at the open ahead of entries (see
+    // processExitOrders' 'market' phase).
+    processExitOrders(context, 'market');
+    processStrategyOrders(context);
+    // Margin checkpoints along the intra-bar path (TV broker emulator): first at the OPEN right
+    // after entries fill; then at the adverse extreme — BEFORE exit fills when the bar's first move
+    // is adverse for the position (the extreme precedes the favorable exits on the path), AFTER them
+    // otherwise (favorable exits free margin first). The 'extreme' checkpoint may schedule a
+    // deferred second margin call at this bar's close (phantom re-check).
+    processMarginCall(context, 'open');
+    // An exit reached before the adverse extreme fills before that margin check.
+    const adverseFirst = isAdverseFirstBar(context) && !exitBeforeAdverseExtreme(context);
+    // strategy.risk.max_intraday_loss is checked at the adverse extreme before the margin is (TV
+    // closes under the risk rule, then has nothing to margin-call).
+    if (adverseFirst) {
+        riskEndOfBarFills(context);
+        processMarginCall(context, 'extreme');
+    }
+    processExitOrders(context, 'intrabar');
+    processDeferredEntries(context);
+    processMarginCall(context, 'favorable');
+    if (!adverseFirst) {
+        riskEndOfBarFills(context);
+        processMarginCall(context, 'extreme');
+    }
 }
 
 /**

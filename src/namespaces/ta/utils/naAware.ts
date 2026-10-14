@@ -14,13 +14,17 @@ function barState(context: any, key: string | undefined, init: () => any) {
     if (!key) return undefined;
     if (!context.taState) context.taState = {};
     let state = context.taState[key];
-    if (!state) state = context.taState[key] = { lastIdx: -1, shared: false, prev: init(), current: init() };
+    if (!state) state = context.taState[key] = { lastIdx: -1, shared: false, prev: init(), current: init(), tick: -1 };
+    const tick = context._execTick ?? 0;
     if (context.idx > state.lastIdx) {
         if (state.lastIdx >= 0) state.prev = { ...state.current };
         state.lastIdx = context.idx;
-    } else if (state.current.callIdx === context.idx) {
+    } else if (state.current.callIdx === context.idx && state.tick === tick) {
+        // A second call within one execution of the bar. (Another execution of the same bar, e.g.
+        // under calc_on_order_fills, recomputes from `prev`.)
         state.shared = true;
     }
+    state.tick = tick;
     return state.shared ? undefined : state;
 }
 
