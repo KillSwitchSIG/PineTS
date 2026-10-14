@@ -125,9 +125,11 @@ export function entry(context: any) {
         // Snap limit/stop to the mintick grid AWAY from current price (the
         // broker-emulator convention — see roundToMintick). For market
         // orders this is a no-op.
+        // In a calc_on_order_fills execution the market is at the fill point, not the bar's close.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, currentPrice, mintick) : undefined;
-        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  currentPrice, mintick) : undefined;
+        const marketPrice = context._fillPointPrice ?? currentPrice;
+        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, marketPrice, mintick) : undefined;
+        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  marketPrice, mintick) : undefined;
 
         const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValueRounded, limitValueRounded, currentPrice), limitValueRounded === undefined);
 

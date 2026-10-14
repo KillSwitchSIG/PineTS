@@ -142,8 +142,13 @@ export function exit(context: any) {
         // below by processExitOrders to suppress the stale-reversal drop
         // for persistent-pattern exits, matching TV's actual behavior of
         // firing the captured value when the user keeps refreshing it.
+        // A bar runs more than once under calc_on_order_fills: compare with the last call on an
+        // earlier bar.
         const history = context.strategy._exit_call_history as Map<string, number>;
-        const lastBarForSite = history.get(callsiteId);
+        const earlier: Map<string, number | undefined> = ((context.strategy as any)._exit_call_earlier ??= new Map());
+        const lastCall = history.get(callsiteId);
+        if (lastCall !== context.idx) earlier.set(callsiteId, lastCall);
+        const lastBarForSite = earlier.get(callsiteId);
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
         history.set(callsiteId, context.idx);
 
