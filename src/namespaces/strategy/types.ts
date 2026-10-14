@@ -175,6 +175,8 @@ export interface Order {
     _placedWithPosition?: boolean;   // placed while a position was open: cancelled when that position goes flat
     // Internal: stop-limit entry whose stop has been reached; it now works as a limit order.
     _stopTriggered?: boolean;
+    // Internal: bar on which this entry waits for the exits reached before it on the bar's path.
+    _deferredPastExits?: number;
 
     // Internal: snapshot of open trade IDs at the moment strategy.close_all()
     // or strategy.close(id) was called. TV binds `close_all` / `close(id)` to

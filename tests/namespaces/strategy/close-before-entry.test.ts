@@ -159,6 +159,23 @@ describe('orders that are not reordered', () => {
         }
     });
 
+    // TradingView, case "12 close immediately" (BINANCE:BTCUSDT 1h): close_all(immediately = true)
+    // queued after an opposite strategy.entry on the same bar does not fill at that close; the
+    // short is closed by the long entry at the next open, under the entry's id.
+    it('an entry queued before close(immediately = true) reverses the position; the close does not fill', async () => {
+        const { open, trades } = await run(`if sig
+    ${REVERSE}
+    if strategy.position_size != 0
+        strategy.close_all(comment = "NOW", immediately = true)`);
+        for (const t of trades) {
+            expect(t.exit_id).toBe(t.entry_id === 'L' ? 'S' : 'L');
+            expect(t.exit_comment).not.toBe('NOW');
+            expect(t.exit_bar_index % 12).toBe(1);
+            expect(t.exit_price).toBe(open[t.exit_bar_index]);
+            expect(Math.abs(t.size)).toBe(1);
+        }
+    });
+
     it('close(immediately = true) fills at the signal close; the entry opens its own qty at the next open', async () => {
         const { close, open, trades, opentrades } = await run(`if sig
     if strategy.position_size != 0
