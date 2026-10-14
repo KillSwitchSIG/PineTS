@@ -341,6 +341,56 @@ function firstExitLegOnPath(context: any, path: number[]): number | undefined {
     return first;
 }
 
+/** An entry / order in an OCA group that acts on its siblings (strategy.oca.cancel / reduce). */
+function ocaGrouped(o: Order): boolean {
+    return !!o.oca_name && (o.oca_type === 'cancel' || o.oca_type === 'reduce');
+}
+
+/**
+ * Where on the bar's path an entry order fills (see pathPosition), or undefined when it does not
+ * fill on this bar. `fillPrice` is the price already computed for it, when known.
+ */
+function entryPathPosition(o: Order, fillPrice: number | undefined, path: number[]): number | undefined {
+    const dir = parseDirection(o.direction);
+    if (o.type === 'market') return 0;
+    const level = o.type === 'limit' ? o.limit : o.stop;
+    if (level === undefined) return undefined;
+    const rising = o.type === 'limit' ? dir === -1 : dir === 1;
+    return pathPosition(path, fillPrice ?? level, rising);
+}
+
+/**
+ * A filled OCA order acts on the other pending orders of its group: strategy.oca.cancel cancels
+ * them, strategy.oca.reduce takes the filled quantity off them (cancelled when nothing is left).
+ */
+function applyOca(strategy: StrategyState, filled: Order): void {
+    const qty = Math.abs((filled as any)._base_qty ?? filled.qty);
+    for (const o of strategy.pending_orders) {
+        if (o === filled || o.status !== 'pending' || o.oca_name !== filled.oca_name) continue;
+        if (filled.oca_type === 'cancel') o.status = 'cancelled';
+        else {
+            o.qty = Math.max(0, o.qty - qty);
+            if ((o as any)._base_qty !== undefined) (o as any)._base_qty = Math.max(0, (o as any)._base_qty - qty);
+            if (o.qty <= 1e-9) o.status = 'cancelled';
+        }
+    }
+}
+
+/**
+ * On a bar whose first move is against the position: is an exit leg of the position reached on the
+ * way from the open to that adverse extreme? It then fills before the margin check at the extreme
+ * (TV: a short's stop at 77,965.92 below the high of 77,999.99 closes the trade; no margin call).
+ */
+export function exitBeforeAdverseExtreme(context: any): boolean {
+    if (!context.strategy || context.strategy.position_size === 0) return false;
+    const open = Series.from(context.data.open).get(0);
+    const high = Series.from(context.data.high).get(0);
+    const low = Series.from(context.data.low).get(0);
+    const close = Series.from(context.data.close).get(0);
+    const at = firstExitLegOnPath(context, barPath(open, high, low, close));
+    return at !== undefined && at < 1;
+}
+
 /**
  * Entries held back by processStrategyOrders because an exit of the position they reverse is
  * reached first on the bar's path: they fill after the intrabar exits, from what those leave.
@@ -500,8 +550,27 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
             }
         }
 
+        // One-cancels-all: when several orders of a group trigger on this bar, the one the path
+        // reaches first fills (and cancels or reduces the others below).
+        if (shouldFill && ocaGrouped(order)) {
+            const path = barPath(openPrice, highPrice, lowPrice, closePrice);
+            const at = entryPathPosition(order, fillPrice, path);
+            const earlierSibling = pending_orders.some(
+                (o) =>
+                    o !== order &&
+                    o.status === 'pending' &&
+                    o.oca_name === order.oca_name &&
+                    ocaGrouped(o) &&
+                    (o.category ?? 'entry') !== 'exit' &&
+                    o.bar < context.idx &&
+                    (entryPathPosition(o, undefined, path) ?? Infinity) < (at ?? Infinity),
+            );
+            if (earlierSibling) continue;
+        }
+
         if (shouldFill) {
             fillEntryOrder(context, order, fillPrice, currentTime, openPrice);
+            if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) applyOca(strategy, order);
             // A limit / stop fill at its level inside the bar: tag the trades it opened, so their exits
             // on this bar only see the path after the fill (see entryBarPathExit).
             if ((order.status as Order['status']) === 'filled' && order.type !== 'market' && fillPrice !== openPrice) {
@@ -616,7 +685,9 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
 /**
  * Orders placed on this bar that fill at its close, after the script ran: every market order
  * with `strategy(process_orders_on_close = true)`, and `strategy.close` / `close_all` with
- * `immediately = true`. Limit, stop and `strategy.exit` orders keep working from the next bar.
+ * `immediately = true`. With process_orders_on_close, a strategy.exit placed on this bar fills at
+ * the close when the close has reached its stop or limit (see fillExitAtClose). Limit and stop
+ * entries keep working from the next bar.
  */
 export function processOrdersOnClose(context: any): void {
     const strategy: StrategyState = context.strategy;
@@ -679,12 +750,57 @@ export function processOrdersOnClose(context: any): void {
         } else if (onClose && (order.category ?? 'entry') === 'entry' && order.type === 'market') {
             markToMarket(context, closePrice);
             fillEntryOrder(context, order, closePrice, currentTime, closePrice);
+        } else if (onClose && (order.category ?? 'entry') === 'exit') {
+            fillExitAtClose(context, order, closePrice, currentTime);
         }
     }
 
     strategy.pending_orders = strategy.pending_orders.filter((o) => o.status === 'pending');
     markToMarket(context, closePrice);
     updateStrategyMetrics(context);
+}
+
+/**
+ * process_orders_on_close: a strategy.exit placed on this bar whose stop or limit the close has
+ * already reached fills at that close (TradingView: a stop at or beyond the close fills at the
+ * close less slippage, a limit at the close; a level only crossed earlier in the bar waits for the
+ * next bar). Trailing legs are left to the next bar.
+ */
+function fillExitAtClose(context: any, order: Order, closePrice: number, currentTime: number): void {
+    const strategy: StrategyState = context.strategy;
+    const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    const matching = strategy.opentrades.filter((t) => !order.from_entry || t.entry_id === order.from_entry);
+    if (matching.length === 0) return;
+    const dir = Math.sign(matching[0].size);
+    const entryQty = matching.reduce((sum, t) => sum + (t._entry_qty ?? Math.abs(t.size)), 0);
+    let cap = Infinity;
+    if (order.qty && order.qty > 0) cap = order.qty;
+    else if (order.qty_percent && order.qty_percent > 0) cap = partialCloseQty(context, entryQty, order.qty_percent);
+    let closed = false;
+    for (const t of matching) {
+        if (cap <= 1e-9) break;
+        if (t._exits_filled?.has(order.id)) continue;
+        const entry = t._bracket_entry ?? t.entry_price;
+        const tp = order.limit ?? (order.profit !== undefined ? entry + dir * order.profit * mintick : undefined);
+        const sl = order.stop ?? (order.loss !== undefined ? entry - dir * order.loss * mintick : undefined);
+        const slHit = sl !== undefined && (dir === 1 ? closePrice <= sl : closePrice >= sl);
+        const tpHit = !slHit && tp !== undefined && (dir === 1 ? closePrice >= tp : closePrice <= tp);
+        if (!slHit && !tpHit) continue;
+        const qty = Math.min(Math.abs(t.size), cap);
+        const kind: 'profit' | 'loss' = slHit ? 'loss' : 'profit';
+        const fillPrice = kind === 'loss' ? applySlippage(context, -dir, closePrice) : closePrice;
+        const comment = kind === 'profit' ? (order.comment_profit ?? order.comment) : (order.comment_loss ?? order.comment);
+        closeMatching(context, order.from_entry, qty, fillPrice, currentTime, { triggerKind: kind, exitId: order.id, exitComment: comment }, t.id);
+        (t._exits_filled ??= new Set()).add(order.id);
+        cap -= qty;
+        closed = true;
+    }
+    const left = strategy.opentrades.some((t) => (!order.from_entry || t.entry_id === order.from_entry) && !t._exits_filled?.has(order.id));
+    if (closed && (!left || cap <= 1e-9)) {
+        order.status = 'filled';
+        order.fill_bar = context.idx;
+        order.fill_time = currentTime;
+    }
 }
 
 /**
@@ -854,7 +970,7 @@ export function openTrade(
     price: number,
     time: number,
     entryComment?: string,
-    isReversalOpen?: boolean,
+    reversalShare?: number,
 ): void {
     const strategy: StrategyState = context.strategy;
     const tradeNum = strategy.opentrades.length + strategy.closedtrades.length;
@@ -862,13 +978,14 @@ export function openTrade(
     // Charge entry-leg commission up front; trade.commission will be increased
     // by the exit leg when it closes (or proportional share on partial close).
     //
-    // For cash_per_order on a reversal open, charge only HALF the flat fee:
-    // the other half is charged to the closing leg in closePartialPosition,
-    // matching TV's 50/50 split of the order's flat fee between the two legs.
+    // A reversal order pays one cash_per_order fee, split between its legs in proportion to their
+    // quantities (TV: closing 0.08103 and opening 0.07953 with a 5 fee → 2.5233 / 2.4767).
+    // `reversalShare` is this leg's part of the order's quantity.
+    const isReversalOpen = reversalShare !== undefined;
     const commTypeOpen = strategy.config.commission_type ?? 'percent';
-    const halveFlat = isReversalOpen && commTypeOpen === 'cash_per_order';
+    const shareFlat = isReversalOpen && commTypeOpen === 'cash_per_order';
     const rawEntryCommission = computeLegCommission(context, strategy, qty, price);
-    const entryCommission = halveFlat ? rawEntryCommission / 2 : rawEntryCommission;
+    const entryCommission = shareFlat ? rawEntryCommission * reversalShare : rawEntryCommission;
 
     const trade: Trade = {
         id: `trade_${tradeNum}`,
@@ -1030,17 +1147,14 @@ function executeOrder(context: any, order: Order, fillPrice: number, fillTime: n
         const remainingQty = order.qty - qtyToClose;
         // True reversal: the SAME order both flattens the prior position
         // AND opens a new one in the opposite direction. For cash_per_order
-        // commission, TV charges the order's flat fee ONCE total — split
-        // 50/50 between the closing leg and the opening leg (so the closing
-        // trade gets +value/2 and the new trade also gets +value/2 on its
-        // entry). Marking the close with isImplicitReversal triggers that
-        // half-charge in closePartialPosition; the new openTrade is told
-        // separately to apply the same half-charge.
+        // commission, TV charges the order's flat fee ONCE, split between the
+        // closing and the opening leg in proportion to their quantities.
         const isReversal = remainingQty > 0;
         closePartialPosition(context, qtyToClose, fillPrice, fillTime, {
             exitId: order.id,
             exitComment: order.comment,
             isImplicitReversal: isReversal,
+            reversalShare: qtyToClose / order.qty,
         });
 
         // If there is remaining quantity (reversal), open a new trade.
@@ -1053,10 +1167,10 @@ function executeOrder(context: any, order: Order, fillPrice: number, fillTime: n
         if (remainingQty > 0) {
             const baseQty = (order as any)._base_qty;
             if (baseQty !== undefined && remainingQty > baseQty + 1e-9) {
-                openTrade(context, order.id, direction, baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
-                openTrade(context, order.id, direction, remainingQty - baseQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
+                openTrade(context, order.id, direction, baseQty, fillPrice, fillTime, order.comment, baseQty / order.qty);
+                openTrade(context, order.id, direction, remainingQty - baseQty, fillPrice, fillTime, order.comment, (remainingQty - baseQty) / order.qty);
             } else {
-                openTrade(context, order.id, direction, remainingQty, fillPrice, fillTime, order.comment, /* isReversalOpen */ true);
+                openTrade(context, order.id, direction, remainingQty, fillPrice, fillTime, order.comment, remainingQty / order.qty);
             }
         }
     } else {
@@ -1087,6 +1201,8 @@ export interface CloseInfo {
      * (percent, cash_per_contract) are unaffected by this flag.
      */
     isImplicitReversal?: boolean;
+    /** The closing leg's part of the reversal order's quantity (its share of a cash_per_order fee). */
+    reversalShare?: number;
 }
 
 type LedgerSlice = {
@@ -1208,9 +1324,9 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         //   - cash_per_order half-fee on implicit-reversal closes.
         const emitClosedRows = (qtyClosed: number) => {
             const commType = strategy.config.commission_type ?? 'percent';
-            const halveFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
+            const shareFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
             const rawExitCommission = computeLegCommission(context, strategy, qtyClosed, exitPrice);
-            const exitCommTotal = halveFlat ? rawExitCommission / 2 : rawExitCommission;
+            const exitCommTotal = shareFlat ? rawExitCommission * (closeInfo?.reversalShare ?? 0.5) : rawExitCommission;
 
             const slices = consumeLedger(strategy, trade, qtyClosed);
             for (const s of slices) {

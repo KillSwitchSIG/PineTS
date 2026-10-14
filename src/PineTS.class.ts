@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processDeferredEntries, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processStrategyOrders, processDeferredEntries, exitBeforeAdverseExtreme, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1183,7 +1183,8 @@ export class PineTS {
                 // 'extreme' checkpoint may schedule a deferred second
                 // margin call at this bar's close (phantom re-check).
                 processMarginCall(context, 'open');
-                const adverseFirst = isAdverseFirstBar(context);
+                // An exit reached before the adverse extreme fills before that margin check.
+                const adverseFirst = isAdverseFirstBar(context) && !exitBeforeAdverseExtreme(context);
                 if (adverseFirst) processMarginCall(context, 'extreme');
                 processExitOrders(context, 'intrabar');
                 processDeferredEntries(context);
