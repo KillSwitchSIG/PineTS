@@ -54,21 +54,8 @@ export function exit(context: any) {
             throw new Error('strategy.exit() called before strategy() declaration');
         }
 
-        // Extract the transpiler-injected callsite ID BEFORE parsing args
-        // (so parseArgsForPineParams doesn't see the sentinel). When the call
-        // comes from non-transpiled JS, the sentinel is absent — fall back
-        // to a per-bar synthetic counter so each "raw" call still gets a
-        // stable id within the bar (the cadence check below is fuzzier in
-        // that case but still works for the canonical patterns).
-        let callsiteId = extractCallsiteId(args);
-        if (callsiteId === undefined) {
-            const s = context.strategy;
-            if (s._exit_fallback_last_bar !== context.idx) {
-                s._exit_fallback_counter = 0;
-                s._exit_fallback_last_bar = context.idx;
-            }
-            callsiteId = `exit_raw_${s._exit_fallback_counter++}`;
-        }
+        // Drop the transpiler-injected callsite sentinel before parsing args.
+        extractCallsiteId(args);
 
         const parsed = parseArgsForPineParams<any>(args, EXIT_SIGNATURES, EXIT_ARGS_TYPES);
 
@@ -108,18 +95,15 @@ export function exit(context: any) {
         // exact `position_avg_price + N`) round to themselves; arbitrary
         // multiplications like `close * 0.95` get the same adverse
         // rounding Pine applies at order placement.
+        // In a calc_on_order_fills execution the market is at the fill point, not the bar's close.
         const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const currentClose = Series.from(context.data.close).get(0);
+        const currentClose = context._fillPointPrice ?? Series.from(context.data.close).get(0);
         const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      currentClose, mintick) : undefined;
         const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       currentClose, mintick) : undefined;
         const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
 
-        // Detect stale-attachment: when this exit is attached to a pending
-        // entry that REVERSES the current position, the user's absolute
-        // limit/stop values (computed from strategy.position_avg_price at
-        // call time) reflect the OUTGOING position's avg, not the incoming
-        // one. TV silently drops those legs; we mark the order here and
-        // processExitOrders skips the absolute legs when the flag is set.
+        // Whether this exit attaches to a pending entry that reverses the position (see the
+        // entry-bar exit path in processExitOrders).
         const fromEntryId = fromEntry ?? '';
         const pendingEntry = fromEntryId
             ? context.strategy.pending_orders.find(
@@ -129,28 +113,6 @@ export function exit(context: any) {
                   (o: Order) => o.category === 'entry' && o.status === 'pending',
               );
         const attachedAtReversal = !!pendingEntry?._isReversalEntry;
-        // Whether a trade this exit covers is already open. Its levels are then taken as given
-        // even when already breached (a sell stop above the market fills at the next open).
-        const coversOpenTrade = context.strategy.opentrades.some((t: any) => !fromEntryId || t.entry_id === fromEntryId);
-
-        // Cadence detection: persistent vs ephemeral capture.
-        // If the user called strategy.exit at THIS exact call site on the
-        // previous bar, the pattern is "every bar" (persistent — variable
-        // is in main scope, value always defined). If the prior bar had
-        // no call, the pattern is "sparse" (ephemeral — variable likely
-        // scoped to an if-block, NA on non-trigger bars in TV). Used
-        // below by processExitOrders to suppress the stale-reversal drop
-        // for persistent-pattern exits, matching TV's actual behavior of
-        // firing the captured value when the user keeps refreshing it.
-        // A bar runs more than once under calc_on_order_fills: compare with the last call on an
-        // earlier bar.
-        const history = context.strategy._exit_call_history as Map<string, number>;
-        const earlier: Map<string, number | undefined> = ((context.strategy as any)._exit_call_earlier ??= new Map());
-        const lastCall = history.get(callsiteId);
-        if (lastCall !== context.idx) earlier.set(callsiteId, lastCall);
-        const lastBarForSite = earlier.get(callsiteId);
-        const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
-        history.set(callsiteId, context.idx);
 
         // Pine semantic: calling strategy.exit with the same `id` REPLACES the
         // prior pending exit order (allowing dynamic TP/SL adjustment each
@@ -200,9 +162,6 @@ export function exit(context: any) {
             alert_trailing: extractValue(parsed.alert_trailing),
             disable_alert: extractValue(parsed.disable_alert),
             _attachedAtReversal: attachedAtReversal,
-            _coversOpenTrade: coversOpenTrade,
-            _isPersistent: isPersistent,
-            _callsiteId: callsiteId,
             // Was a position open when this exit was placed? Such an order belongs to THAT position and dies with it
             // (see processExitOrders); an exit placed while flat waits for its entry, as on TradingView.
             _placedWithPosition: context.strategy.opentrades.length > 0,
