@@ -1194,6 +1194,7 @@ export class PineTS {
                 }
                 processExitOrders(context, 'intrabar');
                 processDeferredEntries(context);
+                processMarginCall(context, 'favorable');
                 if (!adverseFirst) {
                     riskEndOfBarFills(context);
                     processMarginCall(context, 'extreme');
@@ -1208,6 +1209,11 @@ export class PineTS {
 
             // Market orders placed on this bar that fill at its close
             // (process_orders_on_close, close(immediately = true)).
+            // Margin checkpoint at the close, booked after the script saw the bar (TV: the bar's
+            // logged position excludes it) and before the orders filling at the close: a position
+            // opened at the close is first checked at the next open (TV, process_orders_on_close).
+            // A scheduled phantom close call takes its place.
+            if (context.strategy && !(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
             if (context.strategy) processOrdersOnClose(context);
 
             //collect results

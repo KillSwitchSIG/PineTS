@@ -604,6 +604,14 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
         return;
     }
 
+    // Pyramiding is counted when the order fills: two strategy.entry adds queued on one bar with
+    // room for one more entry fill only the first (TV, case "21": pyramiding 3, 2 open, 2 adds).
+    // strategy.order is not limited by pyramiding.
+    if (order.category === 'entry' && Math.sign(strategy.position_size) === parseDirection(order.direction) && wouldExceedPyramiding(strategy, parseDirection(order.direction))) {
+        order.status = 'cancelled';
+        return;
+    }
+
     // Apply slippage against the trade direction (longs fill higher,
     // shorts fill lower). slippage is in ticks of syminfo.mintick and
     // applies to market and stop orders only: a limit fills at its price.
@@ -2528,19 +2536,19 @@ export function isAdverseFirstBar(context: any): boolean {
  * (the "Margin calls" stat in the Strategy Tester is non-zero on 100%
  * margin runs whenever a position's mark-to-market loss exceeds equity).
  */
-export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' | 'close' = 'extreme'): void {
+export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' | 'favorable' | 'close' = 'extreme'): boolean {
     const strategy: StrategyState = context.strategy;
-    if (!strategy || strategy.opentrades.length === 0) return;
+    if (!strategy || strategy.opentrades.length === 0) return false;
 
     const positionDir = Math.sign(strategy.position_size);
-    if (positionDir === 0) return;
+    if (positionDir === 0) return false;
 
     const marginPct = positionDir === 1 ? (strategy.config.margin_long ?? 100) : (strategy.config.margin_short ?? 100);
     // Margin 0 disables the margin model: no margin call, even with negative equity.
-    if (!(marginPct > 0)) return;
+    if (!(marginPct > 0)) return false;
     // Nor after a risk rule stopped the strategy for good (TV, case "20": twice the position held
     // to the end, far below margin, never margin-called).
-    if ((strategy as any)._risk?.haltedFrom !== undefined) return;
+    if ((strategy as any)._risk?.haltedFrom !== undefined) return false;
 
     const openPrice = Series.from(context.data.open).get(0);
     const highPrice = Series.from(context.data.high).get(0);
@@ -2549,7 +2557,16 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
     const currentTime = Series.from(context.data.openTime).get(0);
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
 
-    const adversePrice = checkpoint === 'open' ? openPrice : checkpoint === 'close' ? closePrice : positionDir === 1 ? lowPrice : highPrice;
+    // 'favorable' is the bar's other extreme: a margin call's own commission can leave the account
+    // short there too (TV, cash_per_order 20: calls at the high, then at the low, of one bar).
+    const adversePrice =
+        checkpoint === 'open'
+            ? openPrice
+            : checkpoint === 'close'
+              ? closePrice
+              : (checkpoint === 'favorable') === (positionDir === 1)
+                ? highPrice
+                : lowPrice;
     const totalQty = Math.abs(strategy.position_size);
     const equityAtAdverse = computeEquityAtPrice(context, adversePrice);
     const requiredMarginAtAdverse = computeRequiredMargin(totalQty, adversePrice, marginPct, pointValue);
@@ -2652,7 +2669,9 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // 2026-02-05 (the only lot was the touched one → its TP filled).
         const survivor = fifoBefore.find((t) => t.status === 'open');
         (strategy as any)._mc_exit_lock = { bar: context.idx, tradeId: survivor?.id ?? null };
+        return true;
     }
+    return false;
 }
 
 /**
