@@ -2217,36 +2217,9 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         let absTp: number | undefined = order.limit;
         let absSl: number | undefined = order.stop;
 
-        // Validate trigger prices are on the correct side of avgEntry —
-        // EPHEMERAL pattern only. A wrong-sided leg (e.g. SL below entry
-        // for a short, TP above entry for a short) typically arises when
-        // the user computes the price from strategy.position_avg_price
-        // BEFORE a reversal fill — the value reflects the OUTGOING
-        // position. For sparse/ephemeral exits (variable scoped inside
-        // an if-block), TV's lazy series-eval gives NA on non-trigger
-        // bars → no fire; PT mirrors that by dropping the wrong-sided
-        // leg here.
-        //
-        // For PERSISTENT exits (every-bar refresh, main-scope variable),
-        // TV trusts the captured value and lets gap-fill produce the
-        // actual reachable price — a stale TP sitting on the wrong side
-        // of entry will still fire at the bar's open via gap-fill when
-        // the open is past the trigger. Dropping wrong-sided legs here
-        // would miss that.
-        //
-        // An exit placed while its trade was already open keeps its levels: TradingView fills
-        // a stop / limit that is already breached at the next open (a sell stop above the
-        // market, a long take-profit below it).
-        if (!order._isPersistent && !order._coversOpenTrade) {
-            if (absSl !== undefined) {
-                const slValid = isLong ? absSl < avgEntry : absSl > avgEntry;
-                if (!slValid) absSl = undefined;
-            }
-            if (absTp !== undefined) {
-                const tpValid = isLong ? absTp > avgEntry : absTp < avgEntry;
-                if (!tpValid) absTp = undefined;
-            }
-        }
+        // A stop / limit on the wrong side of the entry is kept: it is already breached and fills
+        // at once (TV: an exit waiting for a long entry, its stop 64,066.01 above the 63,974.01
+        // fill, closes the trade at that fill on the entry bar).
 
         // Trailing-stop state.
         // Two arming modes:
@@ -3113,18 +3086,13 @@ export function initializeStrategy(context: any, config: any): void {
         // Risk-management rules (configured via strategy.risk.*)
         risk_rules: {},
         risk_halted: false,
-
-        // Cadence tracking for strategy.exit (see types.ts).
-        _exit_call_history: new Map<string, number>(),
-        _exit_fallback_counter: 0,
-        _exit_fallback_last_bar: -1,
     };
 }
 
 /**
  * Deep-clone a plain-data value (primitives, arrays, plain objects, Map).
  * Strategy state holds only plain data — Trade/Order/ledger rows are object
- * literals, `_exit_call_history` is a Map<string, number> — so this covers
+ * literals, and the few Maps hold plain values — so this covers
  * every field without a structuredClone dependency.
  */
 function clonePlainValue<T>(value: T): T {

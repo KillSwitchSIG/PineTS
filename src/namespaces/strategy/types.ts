@@ -140,36 +140,10 @@ export interface Order {
     disable_alert?: boolean;
     immediately?: boolean; // strategy.close/close_all: fill at current bar's close
 
-    // Internal: set on `strategy.entry` orders that REVERSE the current
-    // position (opposite direction with existing size). Used by
-    // `strategy.exit` to detect when its absolute limit/stop values were
-    // computed from the OUTGOING position's avg (i.e. stale): the user
-    // typically writes `stop = strategy.position_avg_price + N` on the
-    // crossunder bar, but at that point position_avg_price still reflects
-    // the position being reversed away. TV silently ignores stale legs;
-    // PT drops them at trigger evaluation (see processExitOrders).
+    // Internal: set on `strategy.entry` orders that REVERSE the current position (opposite
+    // direction with existing size), and on `strategy.exit` orders attached to such an entry.
     _isReversalEntry?: boolean;
     _attachedAtReversal?: boolean;
-
-    // Internal: cadence-detection for strategy.exit. TV's broker
-    // emulator uses Pine's lazy series-eval semantic for exit
-    // parameters — the variable behind limit/stop is re-read each bar.
-    // For a variable scoped INSIDE an if-block (sparse pattern), that
-    // gives NA on non-trigger bars → TV doesn't fire stale captures.
-    // For a variable in MAIN scope (persistent pattern, called every
-    // bar), TV reads the captured value → fires stale captures.
-    //
-    // PT can't see the variable's scope from runtime, but the call
-    // CADENCE (how often the user calls strategy.exit per call site)
-    // correlates 1:1. Detected at queue time: if the user called this
-    // exit's callsite on the PRIOR bar, `_isPersistent = true`. Used
-    // by processExitOrders to suppress the stale-reversal drop on
-    // persistent-pattern exits.
-    _isPersistent?: boolean;
-    _callsiteId?: string;
-    // Internal: strategy.exit queued while a trade it covers was already open (its limit / stop
-    // levels are then never dropped as wrong-sided).
-    _coversOpenTrade?: boolean;
     _placedWithPosition?: boolean;   // placed while a position was open: cancelled when that position goes flat
     _seq?: number;                   // strategy.exit placement order (kept by re-calls)
     _placedDir?: number;             // direction of the position open when the exit was placed
@@ -337,15 +311,5 @@ export interface StrategyState {
     // intraday rules — TODO: day rollover detection).
     risk_halted: boolean;
 
-    // Internal: per-callsite cadence tracking for strategy.exit. Keyed by the
-    // transpiler-injected __callsiteId; value is the last context.idx the user
-    // called strategy.exit at that site. Read at queue time to detect whether
-    // the prior bar also called this site (persistent pattern) or not (sparse
-    // / inside-if-block pattern). See Order._isPersistent.
-    _exit_call_history?: Map<string, number>;
-    // Fallback counter for non-transpiled callers (no __callsiteId injection)
-    // — paired with per-bar reset so each "first-of-bar" raw call gets a
-    // stable synthetic id like `exit_raw_N`.
-    _exit_fallback_counter?: number;
     _exit_fallback_last_bar?: number;
 }
