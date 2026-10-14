@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processStrategyOrders, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processStrategyOrders, processDeferredEntries, processOrdersOnClose, processExitOrders, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, isAdverseFirstBar, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1186,6 +1186,7 @@ export class PineTS {
                 const adverseFirst = isAdverseFirstBar(context);
                 if (adverseFirst) processMarginCall(context, 'extreme');
                 processExitOrders(context, 'intrabar');
+                processDeferredEntries(context);
                 if (!adverseFirst) processMarginCall(context, 'extreme');
                 // Latch max_drawdown / max_runup ONCE at the end of the bar so
                 // trades closed mid-bar by TP / SL contribute their realized
