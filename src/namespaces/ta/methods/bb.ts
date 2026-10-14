@@ -10,10 +10,10 @@ export function bb(context: any) {
 
         if (!context.taState) context.taState = {};
         const stateKey = _callId || `bb_${length}_${mult}`;
-        const currentValue = Series.from(source).get(0);
-        // An na value leaves the window as it was
+        // An na value leaves the window as it was, and the bands are those of that window (as ta.sma /
+        // ta.stdev on the na bar)
         const win = nonNaWindow(context, stateKey, Series.from(source), length);
-        if (isNaN(currentValue) || !win) {
+        if (!win) {
             return [[NaN, NaN, NaN]];
         }
         const middle = win.sum / length;

@@ -63,8 +63,8 @@ export function stoch(context: any) {
             state.prev = state.cur;
             state.lastIdx = context.idx;
         }
-        const hw = nonNaWindow(context, `${stateKey}_h`, Series.from(high), length, 'extremes', currentHigh);
-        const lw = nonNaWindow(context, `${stateKey}_l`, Series.from(low), length, 'extremes', currentLow);
+        const hw = nonNaWindow(context, `${stateKey}_h`, Series.from(high), length, 'extremes', currentHigh, 'bars');
+        const lw = nonNaWindow(context, `${stateKey}_l`, Series.from(low), length, 'extremes', currentLow, 'bars');
 
         // Not enough data yet
         if (!hw || !lw) {

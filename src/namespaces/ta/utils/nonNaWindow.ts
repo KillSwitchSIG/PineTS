@@ -26,6 +26,13 @@ export interface NonNaView {
 /** What a window keeps besides its values and sum. */
 export type Track = 'sorted' | 'counts' | 'extremes' | false;
 
+/**
+ * When a window has a value: `'values'` once `length` non-na values have been seen; `'bars'` from
+ * bar_index `length - 1` on, over the non-na values seen so far when there are fewer than `length`
+ * (none: no value).
+ */
+export type Gate = 'values' | 'bars';
+
 /** The source of a window: a series, or a function of the offset (0 = current bar). */
 export type ValueSource = { get(k: number): any } | ((k: number) => number);
 
@@ -103,7 +110,9 @@ class NonNaState implements NonNaView {
  * The last `length` non-na values of a source, newest first, and their sum: the window TradingView's
  * `ta.sma`, `ta.variance`, `ta.stdev`, `ta.median`, `ta.vwma` and `ta.correlation` use. An na value is
  * skipped, not counted, so a bar whose value is na leaves the window as it was. `undefined` while
- * fewer than `length` non-na values have been seen.
+ * fewer than `length` non-na values have been seen. With `gate = 'bars'` (TradingView's ta.highest,
+ * ta.lowest, *bars, ta.stoch, ta.wpr and the pivots) the window instead has a value from bar_index
+ * `length - 1` on, holding the fewer non-na values seen until then (`length` of the view is their count).
  *
  * In a local block the values are those of the calls, as on TradingView; `length` may change from call
  * to call (a series length), the window then reaching further back into the earlier calls. The values
@@ -125,6 +134,7 @@ export function nonNaWindow(
     length: number,
     track: Track = false,
     current?: number,
+    gate: Gate = 'values',
 ): NonNaView | undefined {
     if (!context.taState) context.taState = {};
     let s: NonNaState = context.taState[key];
@@ -164,10 +174,14 @@ export function nonNaWindow(
     s.hi?.sync(h);
     s.lo?.sync(h);
 
-    if (h.size < length) return undefined;
-    s.sorted?.sync(h, length);
-    s.counts?.sync(h, length);
-    s.length = length;
-    s.sum = h.sum(length);
+    let n = length;
+    if (gate === 'bars') {
+        if (context.idx < length - 1 || h.size === 0) return undefined;
+        n = Math.min(length, h.size);
+    } else if (h.size < length) return undefined;
+    s.sorted?.sync(h, n);
+    s.counts?.sync(h, n);
+    s.length = n;
+    s.sum = h.sum(n);
     return s;
 }
