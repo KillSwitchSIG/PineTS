@@ -82,6 +82,8 @@ export interface Trade {
      * before an older lot's (TV ledger convention).
      */
     _bracket_entry?: number;
+    /** Closed rows: the entry-leg part of `commission` (base of the `*_percent` getters). */
+    _entry_commission?: number;
     // Set when a limit / stop entry filled this trade at a price level inside the bar (not at the
     // open): exits on that bar only see the price path after the fill.
     _intrabarEntry?: { bar: number; level: number; type: 'limit' | 'stop'; dir: number };
@@ -218,6 +220,8 @@ export interface StrategyState {
     // Account info — matches Pine names exactly
     initial_capital: number;
     account_currency: string;
+    // Internal: a v5 script without margin_long / margin_short (Pine v5's default: no margin model).
+    _v5_no_margin?: boolean;
     equity: number;
     netprofit: number; // realized only
     grossprofit: number;
