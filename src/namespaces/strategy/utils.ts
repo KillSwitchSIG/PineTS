@@ -86,6 +86,16 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
 }
 
 /**
+ * Denominator of a trade's `*_percent` getters: entry notional plus THAT trade's entry-leg
+ * commission (TradingView: 87.0330 / (4,999.64 + 5) = 1.73905% with a 5 USDT cash_per_order fee).
+ * Rows closed before the entry leg was recorded fall back to half the total commission.
+ */
+export function tradeCostBasis(t: Trade, pointValue: number): number {
+    const entryCommission = t._entry_commission ?? (t.status === 'open' ? t.commission ?? 0 : (t.commission ?? 0) / 2);
+    return Math.abs(t.size) * t.entry_price * pointValue + entryCommission;
+}
+
+/**
  * Margin required to hold a position of `qty` contracts at `price`, given
  * the `marginPct` (% of notional that must be posted as collateral). The
  * pointValue factor converts price units to account-currency dollars
@@ -1075,6 +1085,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
                     entry_time: s.entry_time,
                     size: tradeDirection * s.qty,
                     commission: s.commission + exitCommShare,
+                    _entry_commission: s.commission,
                     max_drawdown: trade.max_drawdown,
                     max_runup: trade.max_runup,
                     status: 'closed',
@@ -2448,8 +2459,13 @@ export function initializeStrategy(context: any, config: any): void {
     };
 
     // Layer order: spec defaults ← source call args ← user .prop overrides (latest wins).
-    const finalConfig = { ...defaults, ...config, ...(context._propOverrides ?? {}) };
+    const given = { ...config, ...(context._propOverrides ?? {}) };
+    const finalConfig = { ...defaults, ...given };
     const initialCapital = finalConfig.initial_capital;
+    // Without `currency`, the account currency is the symbol's (TV: USDT on BINANCE:BTCUSDT).
+    const accountCurrency = given.currency || context.pine?.syminfo?.currency || finalConfig.currency || 'USD';
+    // Pine v5 defaults to no margin model (margin 0) where v6 defaults to 100%.
+    const v5NoMargin = context.pineVersion === 5 && given.margin_long === undefined && given.margin_short === undefined;
 
     context.strategy = {
         config: finalConfig,
@@ -2466,7 +2482,8 @@ export function initializeStrategy(context: any, config: any): void {
 
         // Account info
         initial_capital: initialCapital,
-        account_currency: finalConfig.currency || 'USD',
+        account_currency: accountCurrency,
+        _v5_no_margin: v5NoMargin,
         equity: initialCapital,
         netprofit: 0,
         grossprofit: 0,
