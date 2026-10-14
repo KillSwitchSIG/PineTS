@@ -194,8 +194,6 @@ export function exit(context: any) {
             alert_loss: extractValue(parsed.alert_loss),
             alert_trailing: extractValue(parsed.alert_trailing),
             disable_alert: extractValue(parsed.disable_alert),
-            trail_armed: false,
-            trail_peak: NaN,
             _attachedAtReversal: attachedAtReversal,
             _coversOpenTrade: coversOpenTrade,
             _isPersistent: isPersistent,
@@ -205,22 +203,15 @@ export function exit(context: any) {
             _placedWithPosition: context.strategy.opentrades.length > 0,
         };
 
-        // Trail state carry-over: `trail_armed` and `trail_peak` are NOT
-        // user-supplied parameters — they're engine-accumulated state that
-        // tracks the trail's progress across bars (running high for a long,
-        // running low for a short). When the user calls strategy.exit every
-        // bar (the canonical "persistent" pattern), naive replacement would
-        // reset these to false/NaN every bar, preventing the trail from ever
-        // accumulating beyond a single bar's range. TV's behavior is that
-        // the trail's state persists across re-calls — only the user-tunable
-        // parameters (trail_points, trail_offset, limit, stop, etc.) are
-        // refreshed. Mirror that by copying the trail state forward whenever
-        // the prior order had armed.
-        const armed = replaced.find((o) => o.trail_armed);
-        if (armed) {
-            order.trail_armed = true;
-            order.trail_peak = armed.trail_peak;
-        }
+        // Trail state carry-over: each trade's armed flag and running peak are
+        // engine-accumulated state, not user parameters. When the user calls
+        // strategy.exit every bar (the canonical "persistent" pattern), naive
+        // replacement would reset them every bar, preventing the trail from
+        // ever accumulating beyond a single bar's range. TV's trail state
+        // persists across re-calls — only the user-tunable parameters
+        // (trail_points, trail_offset, limit, stop, etc.) are refreshed.
+        const trails = replaced.find((o) => o._trailByTrade);
+        if (trails) order._trailByTrade = { ...trails._trailByTrade };
         list.push(order);
     };
 }

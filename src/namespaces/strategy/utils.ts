@@ -314,6 +314,56 @@ function pathPosition(path: number[], level: number, rising: boolean): number | 
 }
 
 /**
+ * A trailing stop along the bar's path, from `start` (the open, or a fill inside the bar). The
+ * trail arms where price first reaches `armPrice`; the peak follows favorable moves; it fires where
+ * an adverse move reaches peak ∓ offset ticks, at that level. TradingView:
+ *   - a trail armed on an earlier bar fills at the open when the bar opens past its trigger
+ *     (short trail at 3,752, next open 3,760.75 → 3,760.75);
+ *   - armed on the way to the bar's high, it fires on the way down (trail 79,690 below a high of
+ *     79,890 fills before a stop at 78,842.56);
+ *   - `trail_points = 0` arms at the entry (a short entered at the open fires at entry + offset
+ *     when the bar rises first); `trail_offset = 0` fires at the arming price itself.
+ * Returns the fill (price and path position), if any, and the state at the end of the bar.
+ */
+function walkTrail(
+    path: number[],
+    start: { at: number; price: number },
+    s: { armed: boolean; peak: number; armPrice?: number; offset: number; dir: number; mintick: number },
+): { fill?: { price: number; at: number }; armed: boolean; peak: number } {
+    const { dir, mintick } = s;
+    const u = (p: number) => dir * p; // favorable is up
+    const trigger = (peak: number) => tickLevel(peak, -dir * s.offset, mintick);
+    let armed = s.armed;
+    let peak = s.peak;
+    const points: Array<{ at: number; price: number }> = [start];
+    for (let i = Math.floor(start.at) + 1; i < path.length; i++) points.push({ at: i, price: path[i] });
+
+    // At the start point: a gap past the trigger of an armed trail, or arming right there.
+    if (armed && u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at }, armed, peak };
+    if (!armed && s.armPrice !== undefined && u(start.price) >= u(s.armPrice)) {
+        armed = true;
+        peak = start.price;
+        if (s.offset <= 0) return { fill: { price: start.price, at: start.at }, armed, peak };
+    }
+    for (let k = 0; k + 1 < points.length; k++) {
+        const a = points[k], b = points[k + 1];
+        const pos = (price: number) => (a.price === b.price ? a.at : a.at + ((price - a.price) / (b.price - a.price)) * (b.at - a.at));
+        if (u(b.price) > u(a.price)) {
+            if (!armed && s.armPrice !== undefined && u(b.price) >= u(s.armPrice)) {
+                armed = true;
+                peak = s.armPrice;
+                if (s.offset <= 0) return { fill: { price: s.armPrice, at: pos(s.armPrice) }, armed, peak };
+            }
+            if (armed && u(b.price) > u(peak)) peak = b.price;
+        } else if (armed && u(b.price) < u(a.price)) {
+            const trig = trigger(peak);
+            if (u(b.price) <= u(trig)) return { fill: { price: trig, at: pos(trig) }, armed, peak };
+        }
+    }
+    return { armed, peak };
+}
+
+/**
  * Earliest point on the path where a pending strategy.exit price leg of the open position fills
  * (stop / limit, or profit / loss ticks from each trade's entry). Trailing legs are not considered.
  */
@@ -393,12 +443,17 @@ export function exitBeforeAdverseExtreme(context: any): boolean {
 
 /**
  * Entries held back by processStrategyOrders because an exit of the position they reverse is
- * reached first on the bar's path: they fill after the intrabar exits, from what those leave.
+ * reached first on the bar's path: they fill after the intrabar exits, from what those leave. The
+ * trades they open then meet their own exits on the rest of the path (TV: a long's stop, then a
+ * short stop entry near the low, then that short's stop on the way back up, all on one bar).
  */
 export function processDeferredEntries(context: any): void {
     const strategy: StrategyState | undefined = context.strategy;
     if (!strategy || !strategy.pending_orders.some((o) => o._deferredPastExits === context.idx)) return;
+    const before = new Set(strategy.opentrades.map((t) => t.id));
     processStrategyOrders(context, true);
+    const opened = new Set(strategy.opentrades.filter((t) => !before.has(t.id)).map((t) => t.id));
+    if (opened.size > 0) processExitOrders(context, 'intrabar', opened);
 }
 
 export function processStrategyOrders(context: any, deferredOnly = false): void {
@@ -449,7 +504,20 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
     const limitSlack = limitFillSlack(context);
 
     // Process each pending order that was placed on a previous bar
-    for (const order of pending_orders) {
+    // Entry orders fill in the order the bar's path reaches them (market orders at the open, in
+    // queue order): a buy limit below and a sell limit above, both pending from flat, fill buy
+    // first on a bar that goes down first (TV), whatever order they were placed in.
+    const entryPath = barPath(openPrice, highPrice, lowPrice, closePrice);
+    const fillAt = (o: Order): number => {
+        if ((o.category ?? 'entry') === 'exit' || o.status !== 'pending' || o.bar >= context.idx || o.type === 'market') return 0;
+        const dir = parseDirection(o.direction);
+        const level = o.type === 'limit' ? o.limit : o.stop;
+        if (level === undefined) return 0;
+        return pathPosition(entryPath, level, o.type === 'limit' ? dir === -1 : dir === 1) ?? Infinity;
+    };
+    const queue = pending_orders.map((o, i) => ({ o, i, at: fillAt(o) })).sort((a, b) => a.at - b.at || a.i - b.i).map((x) => x.o);
+
+    for (const order of queue) {
         if (order.status !== 'pending') continue;
 
         // Skip exit-category orders — processExitOrders handles them.
@@ -1897,7 +1965,7 @@ export function isMarketCloseOrder(o: Order): boolean {
     );
 }
 
-export function processExitOrders(context: any, phase: 'market' | 'open' | 'intrabar' = 'intrabar'): void {
+export function processExitOrders(context: any, phase: 'market' | 'open' | 'intrabar' = 'intrabar', onlyTrades?: Set<string>): void {
     if (!context.strategy) return;
     const strategy: StrategyState = context.strategy;
     if (strategy.pending_orders.length === 0) return;
@@ -1976,6 +2044,11 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             }
             continue;
         }
+        if (onlyTrades) {
+            if (isMarketCloseOrder(order)) continue;
+            matching = matching.filter((t) => onlyTrades.has(t.id));
+            if (matching.length === 0) continue;
+        }
 
         let matchingQty = matching.reduce((sum, t) => sum + Math.abs(t.size), 0);
         const matchingDir = Math.sign(matching[0].size); // direction of the position to close
@@ -2045,10 +2118,7 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // at five different prices, assigned to trades strictly
         // oldest-first).
         //
-        // Trailing legs stay COMPOSITE (one armed peak per order, armed
-        // against the weighted-avg entry) — no TV evidence for per-trade
-        // trail under pyramiding yet; single-trade behavior is identical
-        // either way.
+        // Trailing legs are per trade too (see walkTrail below).
         let totalCost = 0;
         for (const t of matching) totalCost += Math.abs(t.size) * t.entry_price;
         const avgEntry = totalCost / matchingQty;
@@ -2090,26 +2160,6 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             }
         }
 
-        // Stale-attachment drop: when the exit was queued at the same bar
-        // as the reversal entry it attaches to, the user's absolute
-        // limit/stop values were computed from the OUTGOING position's
-        // avg. TV's behavior depends on the user's variable scope: if the
-        // variable was scoped to an if-block (lazy series eval gives NA
-        // on non-trigger bars), TV doesn't fire; if the variable is in
-        // main scope (always-defined value), TV fires the captured value.
-        //
-        // Cadence detection runs at queue time (see exit.ts): the
-        // `_isPersistent` flag is set when the user called this same
-        // call site on the prior bar (i.e. the strategy.exit line is
-        // being re-executed every bar). Persistent capture → trust the
-        // value (mirrors TV's main-scope path). Ephemeral capture →
-        // drop the absolute legs (mirrors TV's NA-on-non-trigger-bar
-        // path for if-block-scoped vars).
-        if (order._attachedAtReversal && !order._isPersistent) {
-            if (order.limit !== undefined) absTp = undefined;
-            if (order.stop !== undefined) absSl = undefined;
-        }
-
         // Trailing-stop state.
         // Two arming modes:
         //   trail_price: armed when market reaches the absolute price level
@@ -2124,22 +2174,6 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // the 'intrabar' phase only (arming twice per bar would corrupt
         // trailArmedThisBar, making the segment model treat the arming bar
         // as an armed-prior bar).
-        let trailArmedThisBar = false;
-        if (phase === 'intrabar' && !order.trail_armed && (order.trail_price !== undefined || order.trail_points !== undefined)) {
-            let armPrice: number | undefined;
-            if (order.trail_price !== undefined) armPrice = order.trail_price;
-            else if (order.trail_points !== undefined) {
-                armPrice = tickLevel(avgEntry, isLong ? order.trail_points : -order.trail_points, mintick);
-            }
-            if (armPrice !== undefined) {
-                const armed = isLong ? highPrice >= armPrice : lowPrice <= armPrice;
-                if (armed) {
-                    order.trail_armed = true;
-                    order.trail_peak = isLong ? highPrice : lowPrice;
-                    trailArmedThisBar = true;
-                }
-            }
-        }
         // Peak update is now deferred to checkTrail so we can split it
         // around the intra-bar segment that TV's broker emulator assumes
         // (favorable-first: peak updates BEFORE trigger check;
@@ -2178,7 +2212,8 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // fill price is the OPEN, not the literal trigger price. This
         // mirrors real broker behavior — if you'd planned a stop at $100
         // and the bar opens at $95, you fill at $95.
-        type FillEvent = { qty: number; price: number; kind: 'profit' | 'loss' | 'trailing'; tradeId?: string };
+        // `at`: where on the bar's path the leg fills (see pathPosition); events fill in that order.
+        type FillEvent = { qty: number; price: number; kind: 'profit' | 'loss' | 'trailing'; tradeId?: string; at?: number };
         const tpEvents: FillEvent[] = [];
         const slEvents: FillEvent[] = [];
 
@@ -2296,58 +2331,41 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // The fill is always the LITERAL trigger price — gap-fill at
         // open is incorrect for trail (the bar's open precedes any
         // peak update for this trade).
-        let trailEvent: FillEvent | null = null;
-        if (phase === 'intrabar' && !mcLocked && order.trail_armed && order.trail_offset !== undefined) {
-            const updatePeak = () => {
-                if (isLong) order.trail_peak = Math.max(order.trail_peak ?? -Infinity, highPrice);
-                else order.trail_peak = Math.min(order.trail_peak ?? Infinity, lowPrice);
-            };
-            const triggerFromPeak = (): number =>
-                tickLevel(order.trail_peak as number, isLong ? -(order.trail_offset as number) : (order.trail_offset as number), mintick);
-            const emitTrail = (price: number) => {
-                trailEvent = { qty: Infinity, price, kind: 'trailing' };
-            };
-
-            if (trailArmedThisBar) {
-                // Peak is already the bar's favorable extreme (set by the
-                // arming logic). Don't update again.
-                const trig = triggerFromPeak();
-                if (favorableFirst) {
-                    // Phase 2 (favorable extreme → adverse extreme): low for
-                    // long / high for short crosses trigger.
-                    const hit = isLong ? lowPrice <= trig : highPrice >= trig;
-                    if (hit) emitTrail(trig);
-                } else {
-                    // Phase 3 (favorable extreme → close): close past trigger.
-                    const seg3 = isLong ? closePrice <= trig : closePrice >= trig;
-                    if (seg3) emitTrail(trig);
+        const path = barPath(openPrice, highPrice, lowPrice, closePrice);
+        // Each trade has its own trail, armed from its own entry (TV: two pyramided longs under one
+        // trailing exit — the first one's trail arms and fires while the second's is not armed).
+        const trailEvents: FillEvent[] = [];
+        if (phase === 'intrabar' && !mcLocked && order.trail_offset !== undefined && (order.trail_price !== undefined || order.trail_points !== undefined)) {
+            const states = (order._trailByTrade ??= {});
+            for (const t of matching) {
+                // A trade a limit / stop entry opened inside this bar only sees the path after its fill.
+                const entered = t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
+                let start: { at: number; price: number } = { at: 0, price: openPrice };
+                if (entered) {
+                    const rising = !((entered.type === 'limit') === (entered.dir === 1));
+                    const at = pathPosition(path, entered.level, rising);
+                    if (at !== undefined) start = { at, price: entered.level };
                 }
-            } else if (favorableFirst) {
-                // Already armed in a prior bar. Full segment model.
-                updatePeak();
-                const trig = triggerFromPeak();
-                const hit = isLong ? lowPrice <= trig : highPrice >= trig;
-                if (hit) emitTrail(trig);
-            } else {
-                const oldTrig = triggerFromPeak();
-                const seg1 = isLong ? lowPrice <= oldTrig : highPrice >= oldTrig;
-                if (seg1) {
-                    emitTrail(oldTrig);
-                } else {
-                    updatePeak();
-                    const newTrig = triggerFromPeak();
-                    const seg3 = isLong ? closePrice <= newTrig : closePrice >= newTrig;
-                    if (seg3) emitTrail(newTrig);
-                }
+                const state = states[t.id] ?? { armed: false, peak: NaN };
+                const armPrice =
+                    order.trail_price ?? tickLevel(t._bracket_entry ?? t.entry_price, isLong ? (order.trail_points as number) : -(order.trail_points as number), mintick);
+                const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick });
+                states[t.id] = { armed: fired.armed, peak: fired.peak };
+                if (fired.fill) trailEvents.push({ qty: Math.abs(t.size), price: fired.fill.price, kind: 'trailing', at: fired.fill.at, tradeId: t.id });
             }
         }
 
-        // Path-ordered event list (mirrors the old checkTp/checkSl/
-        // checkTrail priority: TP leg first on favorable-first bars;
-        // SL then trail then TP on adverse-first bars).
-        const events: FillEvent[] = favorableFirst
-            ? [...tpEvents, ...slEvents, ...(trailEvent ? [trailEvent] : [])]
-            : [...slEvents, ...(trailEvent ? [trailEvent] : []), ...tpEvents];
+        // Events fill in the order the bar's path reaches them: a long's trail armed on the way up
+        // fires on the way down before a stop-loss further below (TV, case "05" bar 2375: trail
+        // 79,690 before the stop at 78,842.56). Equal positions keep the leg order (take-profit
+        // first on favorable-first bars; stop, then trail, then take-profit otherwise).
+        for (const ev of tpEvents) ev.at ??= pathPosition(path, ev.price + (isLong ? limitSlack : -limitSlack), isLong) ?? 0;
+        for (const ev of slEvents) ev.at ??= pathPosition(path, ev.price, !isLong) ?? 0;
+        const events: FillEvent[] = (
+            favorableFirst
+                ? [...tpEvents, ...slEvents, ...trailEvents]
+                : [...slEvents, ...trailEvents, ...tpEvents]
+        ).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
 
         if (events.length > 0) {
             // qty / qty_percent caps apply to the TOTAL closed by this order.
