@@ -18,8 +18,8 @@ export function wpr(context: any) {
         // Highest high and lowest low of the last `length` values, as ta.highest / ta.lowest (in a local
         // block, of the calls); an na bar leaves the windows as they were
         const na = isNaN(high) || isNaN(low) || isNaN(close);
-        const hw = nonNaWindow(context, `${stateKey}_h`, context.data.high, length, 'extremes', na ? NaN : high);
-        const lw = nonNaWindow(context, `${stateKey}_l`, context.data.low, length, 'extremes', na ? NaN : low);
+        const hw = nonNaWindow(context, `${stateKey}_h`, context.data.high, length, 'extremes', na ? NaN : high, 'bars');
+        const lw = nonNaWindow(context, `${stateKey}_l`, context.data.low, length, 'extremes', na ? NaN : low, 'bars');
 
         // Not enough data yet
         if (na || !hw || !lw) {

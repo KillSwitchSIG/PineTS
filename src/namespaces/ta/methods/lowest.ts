@@ -18,7 +18,8 @@ export function lowest(context: any) {
 
         // As on TradingView (since 2026-10-09): the last `length` non-na values, the calls' values in a
         // local block (an na value is skipped, as by ta.sma); `length` may change from call to call.
-        const win = nonNaWindow(context, _callId || `lowest_${length}`, series, length, 'extremes');
+        // A value from bar_index `length - 1` on, even with fewer non-na values (as ta.highest).
+        const win = nonNaWindow(context, _callId || `lowest_${length}`, series, length, 'extremes', undefined, 'bars');
         return win ? context.precision(win.min()) : NaN;
     };
 }

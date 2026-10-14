@@ -18,7 +18,9 @@ export function highest(context: any) {
 
         // As on TradingView (since 2026-10-09): the last `length` non-na values, the calls' values in a
         // local block (an na value is skipped, as by ta.sma); `length` may change from call to call.
-        const win = nonNaWindow(context, _callId || `highest_${length}`, series, length, 'extremes');
+        // A value from bar_index `length - 1` on, even with fewer non-na values (`ta.highest(high[1], n)`
+        // has one on bar n - 1, a bar before `ta.highest(high, n)[1]`).
+        const win = nonNaWindow(context, _callId || `highest_${length}`, series, length, 'extremes', undefined, 'bars');
         return win ? context.precision(win.max()) : NaN;
     };
 }
