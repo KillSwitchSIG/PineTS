@@ -74,7 +74,8 @@ describe('contract-aware strategy sizing', () => {
         place(c)('Long', 1, { stop: 125 });
         expect(c.strategy.pending_orders[0].qty).toBe(3);
         c.idx = 1;
-        for (const field of ['open', 'high', 'low', 'close']) c.data[field] = new Series([130]);
+        // opens below the stop and trades through it (a bar opening beyond the stop fills at its open)
+        for (const [field, v] of [['open', 124], ['high', 130], ['low', 124], ['close', 130]] as const) c.data[field] = new Series([v]);
         processStrategyOrders(c);
         expect(c.strategy.opentrades[0].entry_price).toBe(126);
         expect(c.strategy.position_size).toBe(3);

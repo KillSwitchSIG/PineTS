@@ -79,10 +79,27 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     if (!mintick || mintick <= 0 || !Number.isFinite(price)) return price;
     if (price === referencePrice) return price;
     const ticks = price / mintick;
-    // Small epsilon guards against float-imprecision flipping an
-    // already-on-grid value to the next tick.
-    const EPS = 1e-9;
+    // Tolerance (in ticks) for a value already on the grid: a ta.sma of 85,311.77 comes out as
+    // 85,311.7699999999, and TradingView fills `close + 0.2 * atr` = 64,277.98000025 (2.5e-5 ticks
+    // above the grid) at 64,277.98, not 64,277.99.
+    const EPS = 1e-4;
     return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
+}
+
+/**
+ * `base` moved by `ticks` mintick steps (strategy.exit profit / loss legs). When `base` is on the
+ * tick grid the result is the exact grid price, so 62,629.99 + 20001 ticks equals a 62,830.00 high
+ * instead of missing it by float noise (62,830.000000000004).
+ */
+export function tickLevel(base: number, ticks: number, mintick: number): number {
+    const raw = base + ticks * mintick;
+    if (!mintick || mintick <= 0) return raw;
+    const n = base / mintick + ticks;
+    const r = Math.round(n);
+    if (Math.abs(n - r) > 1e-6) return raw;
+    const s = String(mintick);
+    const decimals = s.includes('e-') ? Number(s.split('e-')[1]) + (s.split('e-')[0].split('.')[1]?.length ?? 0) : (s.split('.')[1]?.length ?? 0);
+    return Number((r * mintick).toFixed(decimals));
 }
 
 /**
@@ -341,33 +358,35 @@ export function processStrategyOrders(context: any): void {
 
             case 'limit':
                 // Limit orders fill when price reaches the limit level (past it by
-                // backtest_fill_limits_assumption ticks)
+                // backtest_fill_limits_assumption ticks), at the open when the bar opens
+                // beyond it (a better price, as on TradingView: limit 7,119.35, open 7,102.50 → 7,102.50).
                 if (order.limit !== undefined) {
                     const direction = parseDirection(order.direction);
                     if (direction === 1 && lowPrice <= order.limit - limitSlack) {
                         // Long limit order - buy when price drops to limit
                         shouldFill = true;
-                        fillPrice = order.limit;
+                        fillPrice = Math.min(openPrice, order.limit);
                     } else if (direction === -1 && highPrice >= order.limit + limitSlack) {
                         // Short limit order - sell when price rises to limit
                         shouldFill = true;
-                        fillPrice = order.limit;
+                        fillPrice = Math.max(openPrice, order.limit);
                     }
                 }
                 break;
 
             case 'stop':
-                // Stop orders fill when price crosses the stop level
+                // Stop orders fill when price crosses the stop level, at the open when the bar
+                // opens beyond it (TradingView: all 120 gapped stop entries on AAPL / ES).
                 if (order.stop !== undefined) {
                     const direction = parseDirection(order.direction);
                     if (direction === 1 && highPrice >= order.stop) {
                         // Long stop order - buy when price rises to stop
                         shouldFill = true;
-                        fillPrice = order.stop;
+                        fillPrice = Math.max(openPrice, order.stop);
                     } else if (direction === -1 && lowPrice <= order.stop) {
                         // Short stop order - sell when price falls to stop
                         shouldFill = true;
-                        fillPrice = order.stop;
+                        fillPrice = Math.min(openPrice, order.stop);
                     }
                 }
                 break;
@@ -834,13 +853,13 @@ export function openTrade(
         let sl: number | undefined;
         if (exitOrder.stop !== undefined) sl = exitOrder.stop;
         else if (exitOrder.loss !== undefined) {
-            sl = direction === 1 ? price - exitOrder.loss * mintick : price + exitOrder.loss * mintick;
+            sl = tickLevel(price, -direction * exitOrder.loss, mintick);
         }
         // TP trigger price (limit=absolute, profit=ticks-from-entry).
         let tp: number | undefined;
         if (exitOrder.limit !== undefined) tp = exitOrder.limit;
         else if (exitOrder.profit !== undefined) {
-            tp = direction === 1 ? price + exitOrder.profit * mintick : price - exitOrder.profit * mintick;
+            tp = tickLevel(price, direction * exitOrder.profit, mintick);
         }
 
         if (direction === 1) {
@@ -1687,7 +1706,7 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             let armPrice: number | undefined;
             if (order.trail_price !== undefined) armPrice = order.trail_price;
             else if (order.trail_points !== undefined) {
-                armPrice = isLong ? avgEntry + order.trail_points * mintick : avgEntry - order.trail_points * mintick;
+                armPrice = tickLevel(avgEntry, isLong ? order.trail_points : -order.trail_points, mintick);
             }
             if (armPrice !== undefined) {
                 const armed = isLong ? highPrice >= armPrice : lowPrice <= armPrice;
@@ -1756,11 +1775,11 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             const tQty = Math.abs(t.size);
             let tp = absTp;
             if (tp === undefined && order.profit !== undefined) {
-                tp = isLong ? entry + order.profit * mintick : entry - order.profit * mintick;
+                tp = tickLevel(entry, isLong ? order.profit : -order.profit, mintick);
             }
             let sl = absSl;
             if (sl === undefined && order.loss !== undefined) {
-                sl = isLong ? entry - order.loss * mintick : entry + order.loss * mintick;
+                sl = tickLevel(entry, isLong ? -order.loss : order.loss, mintick);
             }
 
             // A trade a limit / stop entry opened inside this bar: only the path after the fill counts.
@@ -1861,9 +1880,7 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
                 else order.trail_peak = Math.min(order.trail_peak ?? Infinity, lowPrice);
             };
             const triggerFromPeak = (): number =>
-                isLong
-                    ? (order.trail_peak as number) - (order.trail_offset as number) * mintick
-                    : (order.trail_peak as number) + (order.trail_offset as number) * mintick;
+                tickLevel(order.trail_peak as number, isLong ? -(order.trail_offset as number) : (order.trail_offset as number), mintick);
             const emitTrail = (price: number) => {
                 trailEvent = { qty: Infinity, price, kind: 'trailing' };
             };

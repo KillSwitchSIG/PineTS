@@ -89,13 +89,18 @@ export function exit(context: any) {
         // An na leg is absent: `limit = na` with `profit = ...` uses the profit leg.
         const isNaValue = (v: any) => (typeof v === 'number' && Number.isNaN(v)) || (typeof v === 'object' && v !== null && '__value' in v);
         const leg = (v: any) => (isNaValue(v) ? undefined : v);
-        const profit           = leg(extractValue(parsed.profit));
+        // Fractional tick counts (TradingView, mintick 0.01): `profit` / `loss` round to the next
+        // whole tick away from the entry (30000.4 and 30000.6 → 30001), `trail_offset` truncates
+        // (2000.4, 2000.5 and 2000.6 → 2000).
+        const wholeAway = (v: any) => (typeof v === 'number' ? Math.ceil(v - 1e-9) : v);
+        const wholeTrunc = (v: any) => (typeof v === 'number' ? Math.trunc(v + Math.sign(v) * 1e-9) : v);
+        const profit           = wholeAway(leg(extractValue(parsed.profit)));
         const limitRaw         = leg(extractValue(parsed.limit));
-        const loss             = leg(extractValue(parsed.loss));
+        const loss             = wholeAway(leg(extractValue(parsed.loss)));
         const stopRaw          = leg(extractValue(parsed.stop));
         const trailPriceRaw    = leg(extractValue(parsed.trail_price));
         const trailPoints      = leg(extractValue(parsed.trail_points));
-        const trailOffset      = leg(extractValue(parsed.trail_offset));
+        const trailOffset      = wholeTrunc(leg(extractValue(parsed.trail_offset)));
 
         // Snap limit/stop/trail_price to the mintick grid AWAY from the
         // current bar's close (broker-emulator convention — see
