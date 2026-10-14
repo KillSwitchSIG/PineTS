@@ -139,10 +139,6 @@ export interface Order {
     alert_trailing?: string;
     disable_alert?: boolean;
     immediately?: boolean; // strategy.close/close_all: fill at current bar's close
-    // Internal: tracks the running peak used by trailing-stop logic.
-    // For a long: highest high seen since the trail armed; for a short: lowest low.
-    trail_peak?: number;
-    trail_armed?: boolean;
 
     // Internal: set on `strategy.entry` orders that REVERSE the current
     // position (opposite direction with existing size). Used by
@@ -179,6 +175,8 @@ export interface Order {
     _stopTriggered?: boolean;
     // Internal: bar on which this entry waits for the exits reached before it on the bar's path.
     _deferredPastExits?: number;
+    // Internal: strategy.exit trailing state of each trade it applies to, by trade id.
+    _trailByTrade?: Record<string, { armed: boolean; peak: number }>;
 
     // Internal: snapshot of open trade IDs at the moment strategy.close_all()
     // or strategy.close(id) was called. TV binds `close_all` / `close(id)` to

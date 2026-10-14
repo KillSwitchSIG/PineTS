@@ -1937,10 +1937,7 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // at five different prices, assigned to trades strictly
         // oldest-first).
         //
-        // Trailing legs stay COMPOSITE (one armed peak per order, armed
-        // against the weighted-avg entry) — no TV evidence for per-trade
-        // trail under pyramiding yet; single-trade behavior is identical
-        // either way.
+        // Trailing legs are per trade too (see walkTrail below).
         let totalCost = 0;
         for (const t of matching) totalCost += Math.abs(t.size) * t.entry_price;
         const avgEntry = totalCost / matchingQty;
@@ -1996,9 +1993,6 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // the 'intrabar' phase only (arming twice per bar would corrupt
         // trailArmedThisBar, making the segment model treat the arming bar
         // as an armed-prior bar).
-        let trailArmPrice: number | undefined;
-        if (order.trail_price !== undefined) trailArmPrice = order.trail_price;
-        else if (order.trail_points !== undefined) trailArmPrice = tickLevel(avgEntry, isLong ? order.trail_points : -order.trail_points, mintick);
         // Peak update is now deferred to checkTrail so we can split it
         // around the intra-bar segment that TV's broker emulator assumes
         // (favorable-first: peak updates BEFORE trigger check;
@@ -2157,27 +2151,27 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         // open is incorrect for trail (the bar's open precedes any
         // peak update for this trade).
         const path = barPath(openPrice, highPrice, lowPrice, closePrice);
-        let trailEvent: FillEvent | null = null;
-        if (phase === 'intrabar' && !mcLocked && order.trail_offset !== undefined && (order.trail_armed || trailArmPrice !== undefined)) {
-            // A trade a limit / stop entry opened inside this bar only sees the path after its fill.
-            const entered = matching.find((t) => t._intrabarEntry?.bar === context.idx)?._intrabarEntry;
-            let start: { at: number; price: number } = { at: 0, price: openPrice };
-            if (entered) {
-                const rising = !((entered.type === 'limit') === (entered.dir === 1));
-                const at = pathPosition(path, entered.level, rising);
-                if (at !== undefined) start = { at, price: entered.level };
+        // Each trade has its own trail, armed from its own entry (TV: two pyramided longs under one
+        // trailing exit — the first one's trail arms and fires while the second's is not armed).
+        const trailEvents: FillEvent[] = [];
+        if (phase === 'intrabar' && !mcLocked && order.trail_offset !== undefined && (order.trail_price !== undefined || order.trail_points !== undefined)) {
+            const states = (order._trailByTrade ??= {});
+            for (const t of matching) {
+                // A trade a limit / stop entry opened inside this bar only sees the path after its fill.
+                const entered = t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
+                let start: { at: number; price: number } = { at: 0, price: openPrice };
+                if (entered) {
+                    const rising = !((entered.type === 'limit') === (entered.dir === 1));
+                    const at = pathPosition(path, entered.level, rising);
+                    if (at !== undefined) start = { at, price: entered.level };
+                }
+                const state = states[t.id] ?? { armed: false, peak: NaN };
+                const armPrice =
+                    order.trail_price ?? tickLevel(t._bracket_entry ?? t.entry_price, isLong ? (order.trail_points as number) : -(order.trail_points as number), mintick);
+                const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick });
+                states[t.id] = { armed: fired.armed, peak: fired.peak };
+                if (fired.fill) trailEvents.push({ qty: Math.abs(t.size), price: fired.fill.price, kind: 'trailing', at: fired.fill.at, tradeId: t.id });
             }
-            const fired = walkTrail(path, start, {
-                armed: !!order.trail_armed,
-                peak: order.trail_peak as number,
-                armPrice: trailArmPrice,
-                offset: order.trail_offset as number,
-                dir: isLong ? 1 : -1,
-                mintick,
-            });
-            order.trail_armed = fired.armed;
-            order.trail_peak = fired.peak;
-            if (fired.fill) trailEvent = { qty: Infinity, price: fired.fill.price, kind: 'trailing', at: fired.fill.at };
         }
 
         // Events fill in the order the bar's path reaches them: a long's trail armed on the way up
@@ -2188,8 +2182,8 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         for (const ev of slEvents) ev.at ??= pathPosition(path, ev.price, !isLong) ?? 0;
         const events: FillEvent[] = (
             favorableFirst
-                ? [...tpEvents, ...slEvents, ...(trailEvent ? [trailEvent] : [])]
-                : [...slEvents, ...(trailEvent ? [trailEvent] : []), ...tpEvents]
+                ? [...tpEvents, ...slEvents, ...trailEvents]
+                : [...slEvents, ...trailEvents, ...tpEvents]
         ).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
 
         if (events.length > 0) {

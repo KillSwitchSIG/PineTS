@@ -87,6 +87,24 @@ strategy.exit("x", "L", trail_points = 200, trail_offset = 100)`,
     });
 });
 
+describe('trailing stops per trade', () => {
+    it('each pyramided trade arms its own trail from its own entry', async () => {
+        // A at 100, B at 102; trail 2 points / offset 1: A arms at 102 (bar 2's open), B at 104
+        // (never). Bar 3 goes up to 102.6 then down to 101: only A's trail fires, at 101.6
+        const s = await run(
+            `if bar_index == 0
+    strategy.entry("A", strategy.long)
+if bar_index == 1
+    strategy.entry("B", strategy.long)
+strategy.exit("x", trail_points = 200, trail_offset = 100)`,
+            [flat, [100, 100.4, 99.8, 100.2], [102, 102.2, 101.9, 102], [102, 102.6, 101, 101.2], [101.2, 101.4, 101, 101.2]],
+            'default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 2, margin_long = 0, margin_short = 0',
+        );
+        expect(s.closedtrades.map((t: any) => [t.entry_id, t.exit_id, t.exit_price, t.exit_bar_index])).toEqual([['A', 'x', 101.6, 3]]);
+        expect(s.opentrades.map((t: any) => t.entry_id)).toEqual(['B']);
+    });
+});
+
 describe('exits queued with a reversal entry', () => {
     it('a stop on the right side of the new position is kept', async () => {
         // long at bar 1; on bar 2 the script reverses to short with a stop 2% above the close
