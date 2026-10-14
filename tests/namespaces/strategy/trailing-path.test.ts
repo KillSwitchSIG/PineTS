@@ -133,4 +133,22 @@ describe('entry fills in path order', () => {
         expect(s.closedtrades.map((t: any) => [t.entry_id, t.entry_price, t.exit_id, t.exit_price])).toEqual([['L', 99, 'S', 102]]);
         expect(s.position_size).toBe(0);
     });
+
+    it("an entry filled after the bar's exits still meets its own exit on the rest of the path", async () => {
+        // bar 1: open 100, high 103 first, then down to 92, close 96. Down from the high: the buy
+        // limit at 97 fills, its stop at 95 closes it, the sell stop at 93 opens a short; back up
+        // to the close the short's stop at 94 fills (TV, a premium backtester on BTCUSDT 1D)
+        const s = await run(
+            `if bar_index == 0
+    strategy.entry("L", strategy.long, limit = 97)
+    strategy.entry("S", strategy.short, stop = 93)
+strategy.exit("lx", "L", stop = 95)
+strategy.exit("sx", "S", stop = 94)`,
+            [flat, [100, 103, 92, 96], flat],
+        );
+        expect(s.closedtrades.map((t: any) => [t.entry_id, t.entry_price, t.exit_id, t.exit_price, t.exit_bar_index])).toEqual([
+            ['L', 97, 'lx', 95, 1],
+            ['S', 93, 'sx', 94, 1],
+        ]);
+    });
 });

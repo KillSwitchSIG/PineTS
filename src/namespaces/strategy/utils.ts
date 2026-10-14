@@ -443,12 +443,17 @@ export function exitBeforeAdverseExtreme(context: any): boolean {
 
 /**
  * Entries held back by processStrategyOrders because an exit of the position they reverse is
- * reached first on the bar's path: they fill after the intrabar exits, from what those leave.
+ * reached first on the bar's path: they fill after the intrabar exits, from what those leave. The
+ * trades they open then meet their own exits on the rest of the path (TV: a long's stop, then a
+ * short stop entry near the low, then that short's stop on the way back up, all on one bar).
  */
 export function processDeferredEntries(context: any): void {
     const strategy: StrategyState | undefined = context.strategy;
     if (!strategy || !strategy.pending_orders.some((o) => o._deferredPastExits === context.idx)) return;
+    const before = new Set(strategy.opentrades.map((t) => t.id));
     processStrategyOrders(context, true);
+    const opened = new Set(strategy.opentrades.filter((t) => !before.has(t.id)).map((t) => t.id));
+    if (opened.size > 0) processExitOrders(context, 'intrabar', opened);
 }
 
 export function processStrategyOrders(context: any, deferredOnly = false): void {
@@ -1790,7 +1795,7 @@ export function isMarketCloseOrder(o: Order): boolean {
     );
 }
 
-export function processExitOrders(context: any, phase: 'market' | 'open' | 'intrabar' = 'intrabar'): void {
+export function processExitOrders(context: any, phase: 'market' | 'open' | 'intrabar' = 'intrabar', onlyTrades?: Set<string>): void {
     if (!context.strategy) return;
     const strategy: StrategyState = context.strategy;
     if (strategy.pending_orders.length === 0) return;
@@ -1868,6 +1873,11 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
                 if (!hasPendingEntry) order.status = 'cancelled';
             }
             continue;
+        }
+        if (onlyTrades) {
+            if (isMarketCloseOrder(order)) continue;
+            matching = matching.filter((t) => onlyTrades.has(t.id));
+            if (matching.length === 0) continue;
         }
 
         let matchingQty = matching.reduce((sum, t) => sum + Math.abs(t.size), 0);
