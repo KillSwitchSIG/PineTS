@@ -218,6 +218,22 @@ export function limitFillSlack(context: any): number {
     return ticks * (context.pine?.syminfo?.mintick ?? 0.01);
 }
 
+/** The current value of a strategy.* argument, which may arrive as a Series, an array or a getter. */
+export function argValue(val: any): any {
+    if (val === undefined || val === null) return val;
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
+    if (typeof val === 'function') return val();
+    if (val instanceof Series) return val.get(0);
+    if (Array.isArray(val)) return val[val.length - 1];
+    if (typeof val === 'object' && val.get !== undefined) return val.get(0);
+    return val;
+}
+
+/** An argument value that is `na`: a strategy.* argument given as na is absent. */
+export function isNaArg(v: any): boolean {
+    return (typeof v === 'number' && Number.isNaN(v)) || (typeof v === 'object' && v !== null && '__value' in v);
+}
+
 /**
  * The smallest tradable quantity: `syminfo.mincontract` (0.00001 for BINANCE:BTCUSDT), or
  * 0.000001 when the provider does not report one.

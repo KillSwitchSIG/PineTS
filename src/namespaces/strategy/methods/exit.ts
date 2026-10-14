@@ -94,8 +94,8 @@ export function exit(context: any) {
         const loss             = leg(extractValue(parsed.loss));
         const stopRaw          = leg(extractValue(parsed.stop));
         const trailPriceRaw    = leg(extractValue(parsed.trail_price));
-        const trailPoints      = extractValue(parsed.trail_points);
-        const trailOffset      = extractValue(parsed.trail_offset);
+        const trailPoints      = leg(extractValue(parsed.trail_points));
+        const trailOffset      = leg(extractValue(parsed.trail_offset));
 
         // Snap limit/stop/trail_price to the mintick grid AWAY from the
         // current bar's close (broker-emulator convention — see
@@ -142,11 +142,33 @@ export function exit(context: any) {
         const isPersistent = lastBarForSite !== undefined && lastBarForSite === context.idx - 1;
         history.set(callsiteId, context.idx);
 
+        // Pine semantic: calling strategy.exit with the same `id` REPLACES the
+        // prior pending exit order (allowing dynamic TP/SL adjustment each
+        // bar). Without this, stale exits accumulate across the strategy's
+        // lifetime — they survive past their originating trade, and when a
+        // later trade happens to satisfy the wrong-sided / stale-reversal
+        // checks geometrically, the old order fires at a phantom price.
+        // Same id + same from_entry scope is the replacement key.
+        const exitId = idValue ?? 'exit';
+        const list = context.strategy.pending_orders as Order[];
+        const replaced: Order[] = [];
+        for (let i = list.length - 1; i >= 0; i--) {
+            const o = list[i];
+            if (o.category === 'exit' && o.id === exitId && (o.from_entry ?? '') === fromEntryId && o.status === 'pending') {
+                replaced.push(o);
+                list.splice(i, 1);
+            }
+        }
+
+        // With every price leg na the call places no order, and a re-call cancels the
+        // pending exit it replaces (TradingView). It must not become a market close.
+        if ([profit, limit, loss, stop, trailPrice, trailPoints].every((v) => v === undefined)) return;
+
         const order: Order = {
-            id: idValue ?? 'exit',
+            id: exitId,
             direction: 0,           // resolved at trigger based on matching trades
-            qty: qty !== undefined ? Math.abs(Number(qty)) : 0,
-            qty_percent: qtyPercent,
+            qty: qty !== undefined && !isNaValue(qty) ? Math.abs(Number(qty)) : 0,
+            qty_percent: isNaValue(qtyPercent) ? undefined : qtyPercent,
             type: 'market',
             bar: context.idx,
             time: Series.from(context.data.openTime).get(0),
@@ -178,14 +200,6 @@ export function exit(context: any) {
             _placedWithPosition: context.strategy.opentrades.length > 0,
         };
 
-        // Pine semantic: calling strategy.exit with the same `id` REPLACES the
-        // prior pending exit order (allowing dynamic TP/SL adjustment each
-        // bar). Without this, stale exits accumulate across the strategy's
-        // lifetime — they survive past their originating trade, and when a
-        // later trade happens to satisfy the wrong-sided / stale-reversal
-        // checks geometrically, the old order fires at a phantom price.
-        // Same id + same from_entry scope is the replacement key.
-        //
         // Trail state carry-over: `trail_armed` and `trail_peak` are NOT
         // user-supplied parameters — they're engine-accumulated state that
         // tracks the trail's progress across bars (running high for a long,
@@ -197,19 +211,10 @@ export function exit(context: any) {
         // parameters (trail_points, trail_offset, limit, stop, etc.) are
         // refreshed. Mirror that by copying the trail state forward whenever
         // the prior order had armed.
-        const exitId = order.id;
-        const list = context.strategy.pending_orders as Order[];
-        for (let i = list.length - 1; i >= 0; i--) {
-            const o = list[i];
-            if (o.category === 'exit' && o.id === exitId &&
-                (o.from_entry ?? '') === (order.from_entry ?? '') &&
-                o.status === 'pending') {
-                if (o.trail_armed) {
-                    order.trail_armed = true;
-                    order.trail_peak  = o.trail_peak;
-                }
-                list.splice(i, 1);
-            }
+        const armed = replaced.find((o) => o.trail_armed);
+        if (armed) {
+            order.trail_armed = true;
+            order.trail_peak = armed.trail_peak;
         }
         list.push(order);
     };
