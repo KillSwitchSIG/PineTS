@@ -177,6 +177,8 @@ export interface Order {
     _deferredPastExits?: number;
     // Internal: strategy.exit trailing state of each trade it applies to, by trade id.
     _trailByTrade?: Record<string, { armed: boolean; peak: number }>;
+    // Internal: the market order of a strategy.risk close-out (not checked against margin).
+    _risk?: boolean;
 
     // Internal: snapshot of open trade IDs at the moment strategy.close_all()
     // or strategy.close(id) was called. TV binds `close_all` / `close(id)` to
