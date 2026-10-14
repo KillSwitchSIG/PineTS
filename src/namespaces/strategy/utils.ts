@@ -52,6 +52,22 @@ export function parseStrategyOptions(args: any[]): any {
 }
 
 /**
+ * `base` moved by `ticks` mintick steps (strategy.exit profit / loss legs). When `base` is on the
+ * tick grid the result is the exact grid price, so 62,629.99 + 20001 ticks equals a 62,830.00 high
+ * instead of missing it by float noise (62,830.000000000004).
+ */
+export function tickLevel(base: number, ticks: number, mintick: number): number {
+    const raw = base + ticks * mintick;
+    if (!mintick || mintick <= 0) return raw;
+    const n = base / mintick + ticks;
+    const r = Math.round(n);
+    if (Math.abs(n - r) > 1e-6) return raw;
+    const s = String(mintick);
+    const decimals = s.includes('e-') ? Number(s.split('e-')[1]) + (s.split('e-')[0].split('.')[1]?.length ?? 0) : (s.split('.')[1]?.length ?? 0);
+    return Number((r * mintick).toFixed(decimals));
+}
+
+/**
  * Round a stop/limit price to the symbol's mintick grid, AWAY from the
  * reference price (typically the current bar's close at order placement).
  *
@@ -84,22 +100,6 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     // above the grid) at 64,277.98, not 64,277.99.
     const EPS = 1e-4;
     return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
-}
-
-/**
- * `base` moved by `ticks` mintick steps (strategy.exit profit / loss legs). When `base` is on the
- * tick grid the result is the exact grid price, so 62,629.99 + 20001 ticks equals a 62,830.00 high
- * instead of missing it by float noise (62,830.000000000004).
- */
-export function tickLevel(base: number, ticks: number, mintick: number): number {
-    const raw = base + ticks * mintick;
-    if (!mintick || mintick <= 0) return raw;
-    const n = base / mintick + ticks;
-    const r = Math.round(n);
-    if (Math.abs(n - r) > 1e-6) return raw;
-    const s = String(mintick);
-    const decimals = s.includes('e-') ? Number(s.split('e-')[1]) + (s.split('e-')[0].split('.')[1]?.length ?? 0) : (s.split('.')[1]?.length ?? 0);
-    return Number((r * mintick).toFixed(decimals));
 }
 
 /**
