@@ -1200,10 +1200,12 @@ export class PineTS {
 
             // Market orders placed on this bar that fill at its close
             // (process_orders_on_close, close(immediately = true)).
-            if (context.strategy) processOrdersOnClose(context);
             // Margin checkpoint at the close, booked after the script saw the bar (TV: the bar's
-            // logged position excludes it). A scheduled phantom close call takes its place.
+            // logged position excludes it) and before the orders filling at the close: a position
+            // opened at the close is first checked at the next open (TV, process_orders_on_close).
+            // A scheduled phantom close call takes its place.
             if (context.strategy && !(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
+            if (context.strategy) processOrdersOnClose(context);
 
             //collect results
             if (typeof result === 'object') {

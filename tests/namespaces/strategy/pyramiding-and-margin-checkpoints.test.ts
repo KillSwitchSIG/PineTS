@@ -69,4 +69,18 @@ describe('margin checkpoints', () => {
         const calls = s.closedtrades.filter((t: any) => t.exit_comment === 'Margin call' && t.exit_bar_index === 2);
         expect(calls.map((t: any) => t.exit_price)).toEqual([102, 101.5]);
     });
+
+    it('a position opened at the close is first margin-checked at the next open', async () => {
+        // process_orders_on_close: long 10 at bar 0's close (100) with a 20 fee leaves 980 against
+        // 1,000 of margin → margin-called at bar 1's open, not at bar 0's close (TV, a public
+        // strategy on BTCUSDT 1h)
+        const s = await run(
+            'initial_capital = 1000, default_qty_type = strategy.fixed, default_qty_value = 10, process_orders_on_close = true, commission_type = strategy.commission.cash_per_order, commission_value = 20',
+            `if bar_index == 0
+    strategy.entry("L", strategy.long)`,
+            [flat, [100.2, 100.4, 100, 100.2], flat],
+        );
+        const call = s.closedtrades.find((t: any) => t.exit_comment === 'Margin call');
+        expect(call).toMatchObject({ exit_bar_index: 1, exit_price: 100.2 });
+    });
 });
