@@ -547,7 +547,16 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
         if (level === undefined) return 0;
         return pathPosition(entryPath, level, o.type === 'limit' ? dir === -1 : dir === 1) ?? Infinity;
     };
-    const queue = pending_orders.map((o, i) => ({ o, i, at: fillAt(o) })).sort((a, b) => a.at - b.at || a.i - b.i).map((x) => x.o);
+    // Market orders filling together at the open: buy orders before sell orders, whatever the order
+    // they were placed in (TV: strategy.order / strategy.entry short then long, or long then short,
+    // both fill the long first).
+    const sideAtOpen = (o: Order, at: number) => (at === 0 && o.type === 'market' && (o.category ?? 'entry') !== 'exit' ? (parseDirection(o.direction) === 1 ? 0 : 1) : 0);
+    const queue = pending_orders
+        .map((o, i) => ({ o, i, at: fillAt(o) }))
+        .sort((a, b) => a.at - b.at || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
+        .map((x) => x.o);
+    // The position held before this bar's fills: margin is checked against it (see fillEntryOrder).
+    if (!deferredOnly) (strategy as any)._preFillSize = { idx: context.idx, size: strategy.position_size };
 
     for (const order of queue) {
         if (order.status !== 'pending') continue;
@@ -703,13 +712,6 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
         order.status = 'cancelled';
         return;
     }
-    // An entry sized to reverse the position the entries queued before it would open fills with its
-    // own quantity when those did not fill (TV: a short of 2 rejected for margin, then a long of 1
-    // queued after it on the same bar → long 1).
-    if ((order as any)._reversesPending && strategy.position_size === 0 && (order as any)._base_qty > 0) {
-        order.qty = (order as any)._base_qty;
-    }
-
     // Pyramiding is counted when the order fills: two strategy.entry adds queued on one bar with
     // room for one more entry fill only the first (TV, case "21": pyramiding 3, 2 open, 2 adds).
     // strategy.order is not limited by pyramiding.
@@ -779,7 +781,14 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
         const oldSize = strategy.position_size;
         const oldSign = Math.sign(oldSize);
         const isReversal = oldSign !== 0 && oldSign !== direction;
-        const newOpenQty = isReversal ? Math.max(0, order.qty - Math.abs(oldSize)) : order.qty;
+        // Margin is checked against the position held before this bar's fills: an order reversing a
+        // position another order opened at this same open is checked for its whole quantity, and
+        // dropped whole when it fails (TV: a long, then a short of 2 sized to reverse it, at 100,000
+        // with BTC at 83,952 → the long only; at 200,000 the short reverses it).
+        const pre = (strategy as any)._preFillSize;
+        const preSize = pre && pre.idx === context.idx ? pre.size : oldSize;
+        const reversesHeld = isReversal && Math.sign(preSize) === oldSign;
+        const newOpenQty = reversesHeld ? Math.max(0, order.qty - Math.abs(oldSize)) : order.qty;
 
         // Margin 0 disables the margin model: entries are not checked against equity. The
         // max_cons_loss_days close-out order is not checked either (TV fills it on top of a
@@ -799,8 +808,20 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
             }
             const availableEquity = strategy.equity - heldMarginRemaining;
             const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
+            // An entry sized to reverse the position the orders queued before it would open (its own
+            // quantity b plus their s), filling while flat and too large for the account. Fitted on
+            // TradingView probes (BTC at 83,952, quantities 1–3, capital 60,000–400,000), not
+            // understood: with m = min(b, s), it is dropped when b + s − m fits the account, else it
+            // fills m when m fits (a short of 1 and a long of 2: up to 2 × price the long of 1 fills,
+            // from 2 × to 3 × price only the short, from 3 × price the long of 3).
+            const baseQty = (order as any)._base_qty;
+            const part = Math.min(baseQty, order.qty - baseQty);
+            const fits = (q: number) => computeRequiredMargin(q, fillPrice, marginPct, pointValue) <= availableEquity;
+            const partFills =
+                requiredMargin > availableEquity && (order as any)._reversesPending && oldSize === 0 && part > 0 && !fits(order.qty - part) && fits(part);
+            if (partFills) order.qty = part;
 
-            if (requiredMargin > availableEquity) {
+            if (requiredMargin > availableEquity && !partFills) {
                 // TV broker emulator: the margin check only guards the
                 // OPEN leg. On a reversal, the close leg always
                 // executes (it frees margin / realizes the position) —
@@ -810,7 +831,7 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 // liquidation, the remainder was closed by the next
                 // reversal order whose open leg was margin-rejected.
                 const qtyToClose = Math.min(Math.abs(oldSize), order.qty);
-                if (isReversal && qtyToClose > 0) {
+                if (reversesHeld && qtyToClose > 0) {
                     closePartialPosition(context, qtyToClose, fillPrice, currentTime, {
                         exitId: order.id,
                         exitComment: order.comment,
