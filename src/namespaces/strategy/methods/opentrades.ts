@@ -112,7 +112,7 @@ export function opentrades(context: any) {
         const marginLong  = s?.config?.margin_long  ?? 100;
         const marginShort = s?.config?.margin_short ?? 100;
         const dir = Math.sign(s?.position_size ?? 0);
-        const noMargin = !s || s._v5_no_margin || (dir > 0 ? !(marginLong > 0) : dir < 0 ? !(marginShort > 0) : !(marginLong > 0) && !(marginShort > 0));
+        const noMargin = !s || (dir > 0 ? !(marginLong > 0) : dir < 0 ? !(marginShort > 0) : !(marginLong > 0) && !(marginShort > 0));
         if (noMargin) {
             result.capital_held = NaN;
         } else {

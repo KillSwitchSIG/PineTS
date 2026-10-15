@@ -210,7 +210,11 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
             // qty_value = 10 is 10% of equity. The order is sized so that the position AND its
             // entry commission fit in that amount (TradingView): a percent commission scales the
             // unit cost, a per-contract one adds to it, a per-order one is taken off the amount.
-            const positionValue = (strategy.equity * qtyValue) / 100;
+            // Without a margin model (margin 0) it is capped at 100% of equity (TV: 120%, 150% and
+            // 300% at margin 0 all size 10,000 / 63,465.51 = 0.158; at margin 50%, 150% is used).
+            const marginPct = Number(direction === -1 ? strategy.config.margin_short : strategy.config.margin_long);
+            const pct = marginPct === 0 ? Math.min(qtyValue, 100) : qtyValue;
+            const positionValue = (strategy.equity * pct) / 100;
             const unitCost = fillPrice * pointValue;
             const commType = strategy.config.commission_type ?? 'percent';
             const commValue = Number(strategy.config.commission_value ?? 0) || 0;
@@ -3016,12 +3020,13 @@ export function initializeStrategy(context: any, config: any): void {
 
     // Layer order: spec defaults ← source call args ← user .prop overrides (latest wins).
     const given = { ...config, ...(context._propOverrides ?? {}) };
-    const finalConfig = { ...defaults, ...given };
+    // Pine v5 defaults to no margin model (margin 0) where v6 defaults to 100%: a v5 strategy sized at
+    // 150% of equity trades on TradingView, where margin 100% rejects every order.
+    const v5Margins = context.pineVersion === 5 ? { margin_long: 0, margin_short: 0 } : {};
+    const finalConfig = { ...defaults, ...v5Margins, ...given };
     const initialCapital = finalConfig.initial_capital;
     // Without `currency`, the account currency is the symbol's (TV: USDT on BINANCE:BTCUSDT).
     const accountCurrency = given.currency || context.pine?.syminfo?.currency || finalConfig.currency || 'USD';
-    // Pine v5 defaults to no margin model (margin 0) where v6 defaults to 100%.
-    const v5NoMargin = context.pineVersion === 5 && given.margin_long === undefined && given.margin_short === undefined;
 
     context.strategy = {
         config: finalConfig,
@@ -3039,7 +3044,6 @@ export function initializeStrategy(context: any, config: any): void {
         // Account info
         initial_capital: initialCapital,
         account_currency: accountCurrency,
-        _v5_no_margin: v5NoMargin,
         equity: initialCapital,
         netprofit: 0,
         grossprofit: 0,
