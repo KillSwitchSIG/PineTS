@@ -196,8 +196,6 @@ export interface StrategyState {
     // Account info — matches Pine names exactly
     initial_capital: number;
     account_currency: string;
-    // Internal: a v5 script without margin_long / margin_short (Pine v5's default: no margin model).
-    _v5_no_margin?: boolean;
     equity: number;
     netprofit: number; // realized only
     grossprofit: number;
