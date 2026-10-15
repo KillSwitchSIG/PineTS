@@ -162,6 +162,8 @@ export function entry(context: any) {
             // overshoot as two separate lots (xlsx 2021-10-02: 5 +
             // 0.263108 longs at the same fill).
             _base_qty: baseQty,
+            // Reverses a position that only the market entries queued before it on this bar open.
+            _reversesPending: isReversal && Math.sign(strategy.position_size) !== Math.sign(currentSize),
         } as any;
 
         // An entry with the id of an entry order still pending from an earlier bar modifies that
