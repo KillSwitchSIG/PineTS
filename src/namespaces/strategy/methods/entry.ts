@@ -83,7 +83,9 @@ export function entry(context: any) {
         let currentSize = strategy.position_size;
         for (const o of strategy.pending_orders) {
             if (o.bar !== context.idx || o.status !== 'pending') continue;
-            if (o.category === 'entry' && o.type === 'market') {
+            // strategy.entry and strategy.order market orders (TV: an entry queued after a pending
+            // strategy.order in the other direction is sized to reverse it too)
+            if ((o.category === 'entry' || o.category === undefined) && o.type === 'market') {
                 currentSize += parseDirection(o.direction) * o.qty;
             } else if (isMarketCloseOrder(o) && currentSize !== 0) {
                 let trades = strategy.opentrades.filter((t: any) => !o.from_entry || t.entry_id === o.from_entry);
