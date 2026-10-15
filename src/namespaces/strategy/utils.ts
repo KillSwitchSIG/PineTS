@@ -703,6 +703,12 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
         order.status = 'cancelled';
         return;
     }
+    // An entry sized to reverse the position the entries queued before it would open fills with its
+    // own quantity when those did not fill (TV: a short of 2 rejected for margin, then a long of 1
+    // queued after it on the same bar → long 1).
+    if ((order as any)._reversesPending && strategy.position_size === 0 && (order as any)._base_qty > 0) {
+        order.qty = (order as any)._base_qty;
+    }
 
     // Pyramiding is counted when the order fills: two strategy.entry adds queued on one bar with
     // room for one more entry fill only the first (TV, case "21": pyramiding 3, 2 open, 2 adds).
