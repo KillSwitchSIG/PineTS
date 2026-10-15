@@ -641,19 +641,27 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                 }
                 break;
         }
+        if (deferredOnly && (order as any)._deferredFillPrice !== undefined) {
+            shouldFill = true;
+            fillPrice = (order as any)._deferredFillPrice;
+            (order as any)._deferredFillPrice = undefined;
+        }
 
-        // A limit / stop entry against the open position fills where the path reaches it. When an
-        // exit of that position is reached earlier on the path, the exit fills first and the entry
-        // fills after it, with the quantity it was queued with (TV, #316).
-        if (shouldFill && !deferredOnly && (order.type === 'limit' || order.type === 'stop')) {
+        // A limit / stop / stop-limit entry against the open position fills where the path reaches
+        // it. When an exit of that position is reached earlier on the path, the exit fills first and
+        // the entry fills after it, with the quantity it was queued with (TV, #316; a stop-limit
+        // long filling at 64,664 after the short's stop at 64,614, controlled case 22).
+        if (shouldFill && !deferredOnly && (order.type === 'limit' || order.type === 'stop' || order.type === 'stop-limit')) {
             const dir = parseDirection(order.direction);
             const posDir = Math.sign(strategy.position_size);
             if (posDir !== 0 && posDir !== dir) {
                 const path = barPath(openPrice, highPrice, lowPrice, closePrice);
-                const entryAt = pathPosition(path, fillPrice, order.type === 'stop' ? dir === 1 : dir === -1);
+                const entryAt = pathPosition(path, fillPrice, order.type === 'limit' ? dir === -1 : dir === 1);
                 const exitAt = firstExitLegOnPath(context, path);
                 if (entryAt !== undefined && exitAt !== undefined && exitAt < entryAt) {
                     order._deferredPastExits = context.idx;
+                    // fills there later (a stop-limit is marked triggered by now)
+                    (order as any)._deferredFillPrice = fillPrice;
                     continue;
                 }
             }
@@ -2536,10 +2544,15 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
 
     // A position that is now flat takes its exit orders with it: every still-pending exit that was placed while that
     // position was open is cancelled, so it cannot survive the flat period and attach to a LATER entry with stale
-    // levels (e.g. `loss` ticks computed from an earlier bar). Exits placed while flat (waiting for an entry) stay.
+    // levels (e.g. `loss` ticks computed from an earlier bar). Exits placed while flat (waiting for an entry) stay,
+    // and so do exits for another entry than the closed trades' (TV: a long's exit placed while a short was open
+    // fills the long, entered later on the bar the short's stop closed it; controlled case 22).
     if (anyExitFilledThisBar && strategy.opentrades.length === 0) {
+        const closedEntries = new Set(strategy.closedtrades.filter((t) => t.exit_bar_index === context.idx).map((t) => t.entry_id));
         for (const o of strategy.pending_orders) {
-            if (o.status === 'pending' && (o.category ?? 'entry') === 'exit' && o._placedWithPosition) o.status = 'cancelled';
+            if (o.status === 'pending' && (o.category ?? 'entry') === 'exit' && o._placedWithPosition && (!o.from_entry || closedEntries.has(o.from_entry))) {
+                o.status = 'cancelled';
+            }
         }
     }
 
