@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundToMintick, sizingPrice, isMarketCloseOrder, partialCloseQty } from '../utils';
+import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundOrderLevel, sizingPrice, isMarketCloseOrder, partialCloseQty, brokerPrice } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -112,7 +112,7 @@ export function entry(context: any) {
         // current position), Pine ADDS the absolute current position to the
         // requested qty so that one market order both flattens the prior
         // position AND opens the new direction with the requested size.
-        const currentPrice = Series.from(context.data.close).get(0);
+        const currentPrice = brokerPrice(context, Series.from(context.data.close).get(0));
 
         // Determine order type from limit/stop presence
         let orderType: 'market' | 'limit' | 'stop' | 'stop-limit' = 'market';
@@ -124,16 +124,12 @@ export function entry(context: any) {
             orderType = 'stop';
         }
 
-        // Snap limit/stop to the mintick grid AWAY from current price (the
-        // broker-emulator convention — see roundToMintick). For market
-        // orders this is a no-op.
-        // In a calc_on_order_fills execution the market is at the fill point, not the bar's close.
+        // Limit / stop levels go on the mintick grid by the order's side (see roundOrderLevel).
         const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const marketPrice = context._fillPointPrice ?? currentPrice;
-        const limitValueRounded = limitValue !== undefined ? roundToMintick(limitValue, marketPrice, mintick) : undefined;
-        const stopValueRounded  = stopValue  !== undefined ? roundToMintick(stopValue,  marketPrice, mintick) : undefined;
+        const limitValueRounded = limitValue !== undefined ? roundOrderLevel(limitValue, dir, 'limit', mintick) : undefined;
+        const stopValueRounded  = stopValue  !== undefined ? roundOrderLevel(stopValue,  dir, 'stop',  mintick) : undefined;
 
-        const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValueRounded, limitValueRounded, currentPrice), limitValueRounded === undefined);
+        const baseQty = calculateOrderQty(context, qtyValue, dir, sizingPrice(stopValueRounded, limitValueRounded, currentPrice, dir), limitValueRounded === undefined);
 
         const isReversal = currentSize !== 0 && Math.sign(currentSize) !== dir;
         // An order smaller than the symbol's minimum quantity is rejected.

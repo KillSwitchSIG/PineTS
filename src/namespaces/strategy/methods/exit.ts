@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { roundToMintick } from '../utils';
+import { roundToMintick, roundOrderLevel, parseDirection } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -89,19 +89,6 @@ export function exit(context: any) {
         const trailPoints      = leg(extractValue(parsed.trail_points));
         const trailOffset      = wholeTrunc(leg(extractValue(parsed.trail_offset)));
 
-        // Snap limit/stop/trail_price to the mintick grid AWAY from the
-        // current bar's close (broker-emulator convention — see
-        // roundToMintick in utils.ts). Already-aligned inputs (e.g. an
-        // exact `position_avg_price + N`) round to themselves; arbitrary
-        // multiplications like `close * 0.95` get the same adverse
-        // rounding Pine applies at order placement.
-        // In a calc_on_order_fills execution the market is at the fill point, not the bar's close.
-        const mintick = context.pine?.syminfo?.mintick ?? 0;
-        const currentClose = context._fillPointPrice ?? Series.from(context.data.close).get(0);
-        const limit       = limitRaw      !== undefined ? roundToMintick(limitRaw,      currentClose, mintick) : undefined;
-        const stop        = stopRaw       !== undefined ? roundToMintick(stopRaw,       currentClose, mintick) : undefined;
-        const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
-
         // Whether this exit attaches to a pending entry that reverses the position (see the
         // entry-bar exit path in processExitOrders).
         const fromEntryId = fromEntry ?? '';
@@ -113,6 +100,20 @@ export function exit(context: any) {
                   (o: Order) => o.category === 'entry' && o.status === 'pending',
               );
         const attachedAtReversal = !!pendingEntry?._isReversalEntry;
+
+        // Limit / stop levels go on the mintick grid by the exit's side, as entry levels do (TV, AAPL
+        // 1D: a short's stop at 53.4925 placed with the close at 53.5425 works at 53.50). Without a
+        // position or entry to tell the side, and for trail_price, they round away from the close
+        // (in a calc_on_order_fills execution, from the fill point).
+        const mintick = context.pine?.syminfo?.mintick ?? 0;
+        const currentClose = context._fillPointPrice ?? Series.from(context.data.close).get(0);
+        const openTrade = (context.strategy.opentrades as any[]).find((t) => !fromEntryId || t.entry_id === fromEntryId);
+        const positionDir = openTrade ? Math.sign(openTrade.size) : pendingEntry ? parseDirection(pendingEntry.direction) : 0;
+        const level = (raw: number | undefined, kind: 'limit' | 'stop') =>
+            raw === undefined ? undefined : positionDir ? roundOrderLevel(raw, -positionDir, kind, mintick) : roundToMintick(raw, currentClose, mintick);
+        const limit       = level(limitRaw, 'limit');
+        const stop        = level(stopRaw, 'stop');
+        const trailPrice  = trailPriceRaw !== undefined ? roundToMintick(trailPriceRaw, currentClose, mintick) : undefined;
 
         // Pine semantic: calling strategy.exit with the same `id` REPLACES the
         // prior pending exit order (allowing dynamic TP/SL adjustment each

@@ -7,7 +7,8 @@
 //       cash_per_order:      qty = (equity × pct − commission) / price
 //   - `cash` sizing has no commission term;
 //   - market and stop orders are sized at the price slippage would give them (close ± slippage
-//     ticks), limit orders at their limit, and strategy.default_entry_qty(price) at `price`.
+//     ticks), limit orders at their limit, and strategy.default_entry_qty(price) at `price`;
+//   - a limit already marketable at the close is sized at the close, without slippage.
 // The Mock symbol has syminfo.mincontract 0.00001 and syminfo.mintick 0.01.
 
 import { describe, it, expect } from 'vitest';
@@ -88,9 +89,17 @@ describe('orders are sized at the price slippage gives them', () => {
     it('limit orders are sized at the limit, without slippage', async () => {
         const r = await run(
             'initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, slippage = 500',
+            'strategy.entry(d == 1 ? "L" : "S", d == 1 ? strategy.long : strategy.short, limit = d == 1 ? close - 1 : close + 1)'
+        );
+        for (const { i, size } of entries(r)) expect(Math.abs(size)).toBe(floorQty((r.eq[i] * 0.3) / (r.c[i] - Math.sign(size) * 1)));
+    });
+
+    it('a limit already marketable at the close is sized at the close, without slippage', async () => {
+        // TradingView (BINANCE:BTCUSDT 1h, slippage 500): limits 1000 beyond the close, all 125 trades
+        const r = await run(
+            'initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, slippage = 500',
             'strategy.entry(d == 1 ? "L" : "S", d == 1 ? strategy.long : strategy.short, limit = d == 1 ? close + 1000 : close - 1000)'
         );
-        // the limits are marketable (1000 beyond the close), so each fills on the next bar
-        for (const { i, size } of entries(r)) expect(Math.abs(size)).toBe(floorQty((r.eq[i] * 0.3) / (r.c[i] + Math.sign(size) * 1000)));
+        for (const { i, size } of entries(r)) expect(Math.abs(size)).toBe(floorQty((r.eq[i] * 0.3) / r.c[i]));
     });
 });

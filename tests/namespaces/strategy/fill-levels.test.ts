@@ -88,13 +88,13 @@ describe('order levels on the tick grid', () => {
     });
 
     it('fractional profit / loss ticks round to the next whole tick away from the entry', async () => {
-        // entry 100 at bar 1's open; profit 30.4 ticks → 0.31 → TP 100.31; bar 2 high 100.305 does
+        // entry 100 at bar 1's open; profit 30.4 ticks → 0.31 → TP 100.31; bar 2 high 100.30 does
         // not reach it, bar 3 high 100.31 does
         const s = await run(
             `if bar_index == 0
     strategy.entry("L", strategy.long)
 strategy.exit("x", "L", profit = 30.4, loss = 500.6)`,
-            [flat, [100, 100.2, 99.9, 100.1], [100.1, 100.305, 100, 100.2], [100.2, 100.31, 100.1, 100.25], flat],
+            [flat, [100, 100.2, 99.9, 100.1], [100.1, 100.3, 100, 100.2], [100.2, 100.31, 100.1, 100.25], flat],
         );
         expect(s.closedtrades).toHaveLength(1);
         expect(s.closedtrades[0].exit_price).toBe(100.31);
