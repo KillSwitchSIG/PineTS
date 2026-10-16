@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 LuxAlgo
 
-import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundOrderLevel, sizingPrice, isMarketCloseOrder, partialCloseQty, brokerPrice } from '../utils';
+import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundOrderLevel, sizingPrice, isMarketCloseOrder, partialCloseQty, brokerPrice, placeOrder } from '../utils';
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
@@ -169,6 +169,6 @@ export function entry(context: any) {
         strategy.pending_orders = strategy.pending_orders.filter(
             (o: Order) => !(o.category === 'entry' && o.id === idValue && o.status === 'pending' && o.bar < context.idx),
         );
-        strategy.pending_orders.push(orderObj);
+        placeOrder(strategy, orderObj);
     };
 }

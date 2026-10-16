@@ -96,6 +96,24 @@ strategy.exit("x", "S", trail_points = 262, trail_offset = 65)`,
         expect(ctx.strategy!.closedtrades[0].exit_bar_index).toBe(3);
     });
 
+    it('a trail armed at a gap open peaks at the raw open', async () => {
+        // TSLA 1D: a long from 275.77 arms its trail (200 ticks) when the bar opens at 279.266387
+        // (279.27 on the grid) and falls: 100 ticks below the raw open is 278.266, fired at 278.26
+        const ctx = await run(
+            `if bar_index == 0
+    strategy.entry("L", strategy.long)
+strategy.exit("x", "L", trail_points = 200, trail_offset = 100)`,
+            [
+                [275.8, 276, 275.5, 275.8],
+                [275.77, 276.5, 275.2, 276],
+                [279.266387, 283.33305, 277.666389, 281.516385],
+                [281.5, 282, 281, 281.5],
+            ],
+        );
+        expect(ctx.strategy!.closedtrades[0].exit_price).toBe(278.26);
+        expect(ctx.strategy!.closedtrades[0].exit_bar_index).toBe(2);
+    });
+
     it("an exit's trailing leg reached before an opposite stop entry fills first", async () => {
         // 6E 1D (back-adjusted): a short stop entry queued while flat, then a long; the long's trail
         // fires on the way down from the high before the short's stop further below, and the short
@@ -175,6 +193,28 @@ describe('same-point fills', () => {
         const s = ctx.strategy!;
         expect(s.closedtrades[0].entry_id).toBe('BS');
         expect(s.closedtrades[0].exit_id).toBe('SL');
+        expect(s.opentrades).toHaveLength(0);
+    });
+
+    it('a market entry fills at the open before an older stop entry the bar opens past', async () => {
+        // AAPL / NVDA / TSLA 1D: a short stop entry queued earlier and a market long queued on the
+        // previous bar, the bar gapping below the stop: the long fills first, then the short (queued
+        // flat, quantity 1) closes it
+        const ctx = await run(
+            `if bar_index == 0
+    strategy.entry("S", strategy.short, stop = 99)
+if bar_index == 1
+    strategy.entry("L", strategy.long)`,
+            [
+                [100, 100.5, 99.5, 100],
+                [100, 100.5, 99.5, 100],
+                [98, 98.5, 97.5, 98],
+                [98, 98.5, 97.5, 98],
+            ],
+        );
+        const s = ctx.strategy!;
+        expect(s.closedtrades[0].entry_id).toBe('L');
+        expect(s.closedtrades[0].exit_id).toBe('S');
         expect(s.opentrades).toHaveLength(0);
     });
 

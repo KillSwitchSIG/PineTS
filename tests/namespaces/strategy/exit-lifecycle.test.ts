@@ -54,6 +54,70 @@ describe('an exit for an entry that does not exist yet', () => {
     });
 });
 
+describe("a position's exit and an opposite entry reached at the same point", () => {
+    // TV (AAPL / TSLA / NVDA 1D, BTCUSDT 1h): a long's stop and a short stop entry. Both orders fill in
+    // full: the short entry was queued as a reversal (qty 2); an exit filling after the entry opens a
+    // position under its own id.
+    const sameLevel = (first: 'exit' | 'entry') => {
+        const exit = 'strategy.exit("x", "L", stop = 99)';
+        const entry = 'strategy.entry("S", strategy.short, stop = 99)';
+        return `if bar_index == 0
+    strategy.entry("L", strategy.long)
+if bar_index == 1
+    ${first === 'exit' ? exit : entry}
+    ${first === 'exit' ? entry : exit}`;
+    };
+    const touch: Bar[] = [
+        [100, 100.5, 99.5, 100],
+        [100, 100.5, 99.5, 100],
+        [100, 100.2, 98, 98.5],
+        [98.5, 98.8, 98.2, 98.5],
+    ];
+
+    it('at one level, the exit placed first fills first, then the entry with its queued quantity', async () => {
+        const s = await run(sameLevel('exit'), touch);
+        expect(s.closedtrades[0].exit_id).toBe('x');
+        expect(s.opentrades.map((t) => [t.entry_id, t.size])).toEqual([['S', -2]]);
+    });
+
+    it('at one level, the entry placed first reverses the position; the exit then opens one of its own', async () => {
+        const s = await run(sameLevel('entry'), touch);
+        expect(s.closedtrades[0].exit_id).toBe('S');
+        expect(s.opentrades.map((t) => [t.entry_id, t.size, t.entry_price])).toEqual([
+            ['S', -1, 99],
+            ['x', -1, 99],
+        ]);
+    });
+
+    const gap = (exitStop: number, entryStop: number) => `if bar_index == 0
+    strategy.entry("L", strategy.long)
+if bar_index == 1
+    strategy.entry("S", strategy.short, stop = ${entryStop})
+    strategy.exit("x", "L", stop = ${exitStop})`;
+    const gapDown: Bar[] = [
+        [100, 100.5, 99.5, 100],
+        [100, 100.5, 99.5, 100],
+        [97, 97.5, 96.5, 97],
+        [97, 97.5, 96.5, 97],
+    ];
+
+    it('at a gap open past both, the order whose level is nearer the open fills first: the exit', async () => {
+        const s = await run(gap(98, 99), gapDown);
+        expect(s.closedtrades[0].exit_id).toBe('x');
+        expect(s.closedtrades[0].exit_price).toBe(97);
+        expect(s.opentrades.map((t) => [t.entry_id, t.size])).toEqual([['S', -2]]);
+    });
+
+    it('at a gap open past both, the order whose level is nearer the open fills first: the entry', async () => {
+        const s = await run(gap(99, 98), gapDown);
+        expect(s.closedtrades[0].exit_id).toBe('S');
+        expect(s.opentrades.map((t) => [t.entry_id, t.size])).toEqual([
+            ['S', -1],
+            ['x', -1],
+        ]);
+    });
+});
+
 describe('a breached stop at the open', () => {
     // S1 short at bar 1's open (100); at bar 1's close, S2 is added and the exit placed: stop 97
     // (already below the price), take-profit 99. Bar 2 opens at 99.8 and falls through 99.
