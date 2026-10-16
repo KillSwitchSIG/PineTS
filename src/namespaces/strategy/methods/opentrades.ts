@@ -2,6 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
+import { openTradeList } from '../utils';
 
 /**
  * Pine's `strategy.opentrades` mirrors strategy.closedtrades' dual-role
@@ -15,8 +16,7 @@ export function opentrades(context: any) {
     return () => {
         // SNAPSHOT the open-trades list AT CALL TIME (see closedtrades.ts for
         // the rationale — per-bar plot values must capture per-bar state).
-        const live: Trade[] = context.strategy?.opentrades ?? [];
-        const list: Trade[] = live.slice();
+        const list: Trade[] = openTradeList(context);
         const at = (i: any): Trade | undefined => list[Number(i)];
         const currentPrice = (): number => {
             const md = context.marketData;
@@ -117,7 +117,7 @@ export function opentrades(context: any) {
             result.capital_held = NaN;
         } else {
             let totalHeld = 0;
-            for (const t of s.opentrades) totalHeld += Math.abs(t.size) * t.entry_price * pointValue;
+            for (const t of list) totalHeld += Math.abs(t.size) * t.entry_price * pointValue;
             result.capital_held = totalHeld;
         }
 

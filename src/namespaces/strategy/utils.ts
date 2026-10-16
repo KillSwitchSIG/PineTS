@@ -1873,6 +1873,39 @@ function ledgerOpenLots(strategy: StrategyState): Array<{ qty: number; entry_pri
 }
 
 /**
+ * The open trades as the script sees them (strategy.opentrades.*, capital_held): the entry records
+ * not yet paired with exits, oldest first. Closes and exits for an entry id are booked against the
+ * oldest trades under FIFO, while the physical lots keep each id's own quantity (what a close or an
+ * exit for that id may still take). TradingView, close_entries_rule FIFO, A 1 / B 2 / C 3 open:
+ * close("C", qty = 1) leaves the trades B 2, C 3 (C's own quantity is then 2). Falls back to the
+ * physical lots when no records exist (hand-built states).
+ */
+export function openTradeList(context: any): Trade[] {
+    const strategy: StrategyState | undefined = context.strategy;
+    if (!strategy) return [];
+    const records: any[] = (strategy as any)._ledger_entries ?? [];
+    if (records.length === 0) return strategy.opentrades.slice();
+    const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
+    const dir = Math.sign(strategy.position_size) || 1;
+    return records.map((r, i) => {
+        const m = excMoney(r._fav, r._adv, r.qty, pointValue, r.commission);
+        return {
+            id: `open_${i}`,
+            entry_id: r.entry_id,
+            entry_comment: r.entry_comment,
+            entry_price: r.entry_price,
+            entry_bar_index: r.entry_bar_index,
+            entry_time: r.entry_time,
+            size: (r._dir ?? dir) * r.qty,
+            commission: r.commission,
+            max_runup: m.runup,
+            max_drawdown: m.drawdown,
+            status: 'open',
+        } as Trade;
+    });
+}
+
+/**
  * Mark-to-market the open positions to `currentPrice`, updating
  * `strategy.openprofit` and `strategy.equity`. Does NOT touch the
  * max_drawdown / max_runup peaks — those are latched once per bar by
@@ -2098,8 +2131,8 @@ function excReplay(context: any): void {
  * by `fromEntry` — when set, only trades whose `entry_id === fromEntry` are
  * eligible. Falls back to closing across all open trades when empty/undefined.
  *
- * Wraps `closePartialPosition` by temporarily reorganizing `opentrades` so
- * the matching trades sit at the head of the FIFO queue.
+ * Wraps `closePartialPosition` by temporarily putting the matching lots at the head of the queue
+ * (the closed-trade rows still pair with the oldest entry records, see consumeLedger).
  */
 export function closeMatching(
     context: any,
@@ -2111,6 +2144,11 @@ export function closeMatching(
     specificTradeId?: string,
 ): void {
     const strategy: StrategyState = context.strategy;
+    // The lots go back to their order afterwards: a later unnamed fill (strategy.order, close_all, a
+    // margin call) takes each id's quantity oldest first (TV: after close("C") with A / B / C open,
+    // strategy.order short 1.5 takes A's 1 and 0.5 of B).
+    const order = new Map(strategy.opentrades.map((t, i) => [t, i]));
+    const restoreOrder = () => strategy.opentrades.sort((a, b) => (order.get(a) ?? Infinity) - (order.get(b) ?? Infinity));
 
     // Per-LOT close (exit brackets): TV binds each bracket to the physical
     // entry lot whose entry price computed its level — the fill closes
@@ -2127,6 +2165,7 @@ export function closeMatching(
         const targetQty = Math.abs(target[0].size);
         strategy.opentrades = [...target, ...others];
         closePartialPosition(context, Math.min(qtyToClose, targetQty), exitPrice, exitTime, closeInfo);
+        restoreOrder();
         return;
     }
 
@@ -2151,6 +2190,7 @@ export function closeMatching(
 
     strategy.opentrades = [...matching, ...others];
     closePartialPosition(context, effectiveClose, exitPrice, exitTime, closeInfo);
+    restoreOrder();
 }
 
 /**
