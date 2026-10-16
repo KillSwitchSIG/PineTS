@@ -87,8 +87,9 @@ describe('processMarginCall — partial liquidation (TV 4× rule)', () => {
         expect(s.netprofit).toBeCloseTo(-2.1818 * 10000, 6);
     });
 
-    it('liquidates the whole position when the cover is smaller than one quantity step', () => {
+    it('liquidates one unit when the cover is smaller than one quantity step', () => {
         // capital 599,999.5: deficit = 550,000 − 549,999.5 = 0.5 → cover 0.0000045 < 0.00001.
+        // TradingView: 1 share of 159 (AAPL), 1 ES contract of 2 or 4, 1.0 BTC of 1.75417.
         const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 599999.5 });
         openShort(context, 5, 100000);
 
@@ -96,8 +97,18 @@ describe('processMarginCall — partial liquidation (TV 4× rule)', () => {
 
         const s = context.strategy;
         expect(s.closedtrades.length).toBe(1);
-        expect(Math.abs(s.closedtrades[0].size)).toBe(5);
-        expect(s.position_size).toBe(0);
+        expect(Math.abs(s.closedtrades[0].size)).toBe(1);
+        expect(s.position_size).toBe(-4);
+    });
+
+    it('liquidates the whole position when it is smaller than one unit', () => {
+        // deficit = 55,000 − (59,999.95 − 5,000) = 0.05 → cover below one step
+        const context = makeContext({ open: 101000, high: 110000, low: 99000, close: 105000 }, { initial_capital: 59999.95 });
+        openShort(context, 0.5, 100000);
+
+        processMarginCall(context);
+
+        expect(context.strategy.position_size).toBe(0);
     });
 
     it('applies slippage to the liquidation fill', () => {
