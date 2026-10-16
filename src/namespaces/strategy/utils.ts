@@ -940,11 +940,16 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
             //   - reversal: nothing remains from old position.
             //   - pyramiding (same dir): existing held margin stays.
             //   - fresh entry: nothing held to begin with.
+            // An order filling inside the bar is checked against the equity at its fill (TV: a sell
+            // stop reversal needing 10,044.06 at 64,257.33, equity 10,044.53 at the open but 10,035.06
+            // at the fill: the long closes, no short opens).
+            const intrabar = (context._pathAt ?? 0) > 0 && (context._pathAt ?? 0) < 3;
             let heldMarginRemaining = 0;
             if (oldSign === direction) {
-                heldMarginRemaining = computeHeldMargin(context, markPrice);
+                heldMarginRemaining = computeHeldMargin(context, intrabar ? fillPrice : markPrice);
             }
-            const availableEquity = strategy.equity - heldMarginRemaining;
+            const equityNow = intrabar && oldSize !== 0 ? computeEquityAtPrice(context, fillPrice) : strategy.equity;
+            const availableEquity = equityNow - heldMarginRemaining;
             const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
             // An entry sized to reverse the position the orders queued before it would open (its own
             // quantity b plus their s), filling while flat and too large for the account. Fitted on
@@ -1492,6 +1497,10 @@ export function openTrade(
         strategy.grossloss += entryCommission;
     }
 
+    // Margin is not checked at points of the bar before this fill (see processMarginCall).
+    const fillAt = context._pathAt ?? 0;
+    const marginFrom = (strategy as any)._marginFrom;
+    if (fillAt > 0 && !(marginFrom?.idx === context.idx && marginFrom.at >= fillAt)) (strategy as any)._marginFrom = { idx: context.idx, at: fillAt };
     // Excursions start at the fill (see excOpen); the equity replay sees the new lot.
     ledgerRecord._dir = direction;
     excOpen(context, trade, direction);
@@ -2910,6 +2919,14 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
               : (checkpoint === 'favorable') === (positionDir === 1)
                 ? highPrice
                 : lowPrice;
+    // A checkpoint the bar's path reached before an entry filled inside the bar is not checked: the
+    // position did not hold there (TV: a sell stop filled on the way down from the high is checked at
+    // the low and the close, not at the open or the high).
+    const checkpointAt = checkpoint === 'open' ? 0 : checkpoint === 'close' ? 3 : barPath(openPrice, highPrice, lowPrice, closePrice)[1] === adversePrice ? 1 : 2;
+    const seg = context._excSeg;
+    const marginFrom = (strategy as any)._marginFrom;
+    if (marginFrom?.idx === context.idx && (seg ? seg.offset + checkpointAt * seg.scale : checkpointAt) < marginFrom.at - 1e-9) return false;
+
     const totalQty = Math.abs(strategy.position_size);
     const equityAtAdverse = computeEquityAtPrice(context, adversePrice);
     const requiredMarginAtAdverse = computeRequiredMargin(totalQty, adversePrice, marginPct, pointValue);
@@ -2937,9 +2954,10 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         // 4×deficit/(price·m) — verified exactly on fresh TV captures at
         // margin_long/short = 50 (close-MC investigation, 2026-06-12).
         const marginFrac = marginPct / 100;
-        // A cover smaller than one step liquidates the whole position.
+        // A cover smaller than one step liquidates one unit (TV: 1 share of 159 on AAPL, 1 ES contract of
+        // 2 or 4, 1.0 BTC of 1.75417), the whole position when it is smaller.
         const coverQty = floorQty(context, deficit / (adversePrice * pointValue * marginFrac));
-        const qtyToLiquidate = coverQty > 0 ? Math.min(totalQty, Number((4 * coverQty).toFixed(10))) : totalQty;
+        const qtyToLiquidate = coverQty > 0 ? Math.min(totalQty, Number((4 * coverQty).toFixed(10))) : Math.min(totalQty, 1);
 
         // Remember the FIFO order before the close so we can identify the
         // PARTIALLY-consumed lot afterwards (the liquidation eats whole
@@ -2951,7 +2969,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         const frontEntry = frontPiece.entry_price;
 
         // The liquidation is a market order: slippage applies against the position.
-        setFillAt(context, checkpoint === 'open' ? 0 : checkpoint === 'close' ? 3 : barPath(openPrice, highPrice, lowPrice, closePrice)[1] === adversePrice ? 1 : 2);
+        setFillAt(context, checkpointAt);
         closePartialPosition(context, qtyToLiquidate, applySlippage(context, -positionDir, adversePrice), currentTime, {
             exitId: MARGIN_CALL_EXIT_ID,
             exitComment: 'Margin call',
