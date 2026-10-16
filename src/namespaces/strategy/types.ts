@@ -146,6 +146,7 @@ export interface Order {
     _attachedAtReversal?: boolean;
     _placedWithPosition?: boolean;   // placed while a position was open: cancelled when that position goes flat
     _seq?: number;                   // strategy.exit placement order (kept by re-calls)
+    _placed?: number;                // placement order of entries and exits (each call, see placeOrder)
     _placedDir?: number;             // direction of the position open when the exit was placed
     // Internal: stop-limit entry whose stop has been reached; it now works as a limit order.
     _stopTriggered?: boolean;

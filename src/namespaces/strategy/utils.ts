@@ -388,7 +388,7 @@ function walkTrail(
     path: number[],
     start: { at: number; price: number },
     s: { armed: boolean; peak: number; armPrice?: number; offset: number; dir: number; mintick: number; offGrid?: { peakAt: (p: number) => number } },
-): { fill?: { price: number; at: number }; armed: boolean; peak: number } {
+): { fill?: { price: number; at: number; level: number }; armed: boolean; peak: number } {
     const { dir, mintick } = s;
     const u = (p: number) => dir * p; // favorable is up
     const trigger = (peak: number) => {
@@ -404,14 +404,14 @@ function walkTrail(
     for (let i = Math.floor(start.at) + 1; i < path.length; i++) points.push({ at: i, price: path[i] });
 
     // At the start point: a gap past the trigger of an armed trail, or arming right there.
-    if (armed && u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at }, armed, peak };
+    if (armed && u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at, level: trigger(peak) }, armed, peak };
     // A favorable gap moves the peak to the open (TV, AAPL 1D: a short's trail peaked at 125.60, the
     // next bar opens at 123.76 and rallies: it fires at 123.76 + 0.65 = 124.41, not 125.60 + 0.65).
     if (armed && u(peakAt(start.price)) > u(peak)) peak = peakAt(start.price);
     if (!armed && s.armPrice !== undefined && u(start.price) >= u(s.armPrice)) {
         armed = true;
-        peak = start.price;
-        if (s.offset <= 0) return { fill: { price: start.price, at: start.at }, armed, peak };
+        peak = peakAt(start.price);
+        if (s.offset <= 0) return { fill: { price: start.price, at: start.at, level: start.price }, armed, peak };
     }
     for (let k = 0; k + 1 < points.length; k++) {
         const a = points[k], b = points[k + 1];
@@ -420,12 +420,12 @@ function walkTrail(
             if (!armed && s.armPrice !== undefined && u(b.price) >= u(s.armPrice)) {
                 armed = true;
                 peak = s.armPrice;
-                if (s.offset <= 0) return { fill: { price: s.armPrice, at: pos(s.armPrice) }, armed, peak };
+                if (s.offset <= 0) return { fill: { price: s.armPrice, at: pos(s.armPrice), level: s.armPrice }, armed, peak };
             }
             if (armed && u(peakAt(b.price)) > u(peak)) peak = peakAt(b.price);
         } else if (armed && u(b.price) < u(a.price)) {
             const trig = trigger(peak);
-            if (u(b.price) <= u(trig)) return { fill: { price: trig, at: pos(trig) }, armed, peak };
+            if (u(b.price) <= u(trig)) return { fill: { price: trig, at: pos(trig), level: trig }, armed, peak };
         }
     }
     return { armed, peak };
@@ -447,32 +447,48 @@ function trailStart(context: any, t: any, path: number[]): { at: number; price: 
  * (stop / limit, or profit / loss ticks from each trade's entry). Trailing legs count with `withTrail`.
  */
 function firstExitLegOnPath(context: any, path: number[], withTrail = false): number | undefined {
+    let first: number | undefined;
+    for (const leg of exitLegsOnPath(context, path, withTrail)) if (first === undefined || leg.at < first) first = leg.at;
+    return first;
+}
+
+/** Every pending strategy.exit leg of the open position the bar's path reaches (see firstExitLegOnPath). */
+function exitLegsOnPath(context: any, path: number[], withTrail: boolean): Array<{ at: number; level: number; order: Order; trade: any }> {
     const strategy: StrategyState = context.strategy;
     const dir = Math.sign(strategy.position_size);
-    if (dir === 0) return undefined;
+    const legs: Array<{ at: number; level: number; order: Order; trade: any }> = [];
+    if (dir === 0) return legs;
     const mintick = context.pine?.syminfo?.mintick ?? 0.01;
     const slack = limitFillSlack(context);
-    let first: number | undefined;
-    const consider = (p: number | undefined) => {
-        if (p !== undefined && (first === undefined || p < first)) first = p;
-    };
     for (const o of strategy.pending_orders) {
         if (o.status !== 'pending' || (o.category ?? 'entry') !== 'exit' || o.bar >= context.idx) continue;
         for (const t of strategy.opentrades) {
             if (o.from_entry && t.entry_id !== o.from_entry) continue;
+            if (t._exits_filled?.has(o.id)) continue;
+            const consider = (at: number | undefined, level: number) => {
+                if (at !== undefined) legs.push({ at, level, order: o, trade: t });
+            };
             const entry = t._bracket_entry ?? t.entry_price;
             const tp = o.limit ?? (o.profit !== undefined ? entry + dir * o.profit * mintick : undefined);
             const sl = o.stop ?? (o.loss !== undefined ? entry - dir * o.loss * mintick : undefined);
-            if (tp !== undefined) consider(pathPosition(path, tp + dir * slack, dir === 1));
-            if (sl !== undefined) consider(pathPosition(path, sl, dir !== 1));
+            if (tp !== undefined) consider(pathPosition(path, tp + dir * slack, dir === 1), tp);
+            if (sl !== undefined) consider(pathPosition(path, sl, dir !== 1), sl);
             if (withTrail && o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
                 const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
                 const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
-                consider(walkTrail(path, trailStart(context, t, path), { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) }).fill?.at);
+                const fill = walkTrail(path, trailStart(context, t, path), { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) }).fill;
+                if (fill) consider(fill.at, fill.level);
             }
         }
     }
-    return first;
+    return legs;
+}
+
+/** Queues an entry or exit order, numbering it in placement order across both kinds. */
+export function placeOrder(strategy: StrategyState, order: Order): void {
+    const s = strategy as any;
+    order._placed = s._placeCount = (s._placeCount ?? 0) + 1;
+    strategy.pending_orders.push(order);
 }
 
 /** An entry / order in an OCA group that acts on its siblings (strategy.oca.cancel / reduce). */
@@ -736,18 +752,53 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
         // it. When an exit of that position is reached earlier on the path, the exit fills first and
         // the entry fills after it, with the quantity it was queued with (TV, #316; a stop-limit
         // long filling at 64,664 after the short's stop at 64,614, controlled case 22).
+        // An exit reached at the same point as the entry: at a gap open, the order whose level is
+        // nearer the open fills first; at the same level, the one placed first (TV, AAPL / NVDA /
+        // TSLA 1D, BTCUSDT 1h). Both fill in full: an exit after the entry still sells / buys its
+        // quantity, opening a position under its own id (a long's stop and a short stop entry at
+        // one level, the entry placed first: the entry reverses to short 1, the exit adds short 1).
+        let tiedExits: Array<{ order: Order; trade: any }> = [];
         if (shouldFill && !deferredOnly && (order.type === 'limit' || order.type === 'stop' || order.type === 'stop-limit')) {
             const dir = parseDirection(order.direction);
             const posDir = Math.sign(strategy.position_size);
             if (posDir !== 0 && posDir !== dir) {
                 const path = barPath(openPrice, highPrice, lowPrice, closePrice);
                 const entryAt = pathPosition(path, fillPrice, order.type === 'limit' ? dir === -1 : dir === 1);
-                const exitAt = firstExitLegOnPath(context, path, true);
-                if (entryAt !== undefined && exitAt !== undefined && exitAt < entryAt) {
+                const legs = entryAt === undefined ? [] : exitLegsOnPath(context, path, true);
+                const entryLevel = (order.type === 'limit' ? order.limit : order.stop) as number;
+                // Only the exits of trades held before this bar can be reached at the entry's point
+                // together with it; a trade opened at that same open is not.
+                const tied = (leg: { at: number; trade: any }) => Math.abs(leg.at - (entryAt as number)) <= 1e-9 && leg.trade.entry_bar_index < context.idx;
+                // An exit's level is its tightest working stop: with the stop-loss and an armed trail
+                // both past the open, the trail's (TV, AAPL 1D: trail 71.70 / stop-loss 67.50 / short
+                // stop entry 68.24, open 65.94: the entry is nearer the open and fills first).
+                const exitLevelDistance = new Map<string, number>();
+                for (const leg of legs) {
+                    if (!tied(leg)) continue;
+                    const key = `${leg.order._placed}:${leg.trade.id}`;
+                    exitLevelDistance.set(key, Math.max(exitLevelDistance.get(key) ?? 0, Math.abs(leg.level - openPrice)));
+                }
+                const dEntry = Math.abs(entryLevel - openPrice);
+                const exitFirst = legs.some((leg) => {
+                    if (leg.at < (entryAt as number) - 1e-9) return true;
+                    if (!tied(leg)) return false;
+                    const dExit = exitLevelDistance.get(`${leg.order._placed}:${leg.trade.id}`) as number;
+                    if (entryAt === 0 && Math.abs(dExit - dEntry) > 1e-9) return dExit < dEntry;
+                    return (leg.order._placed ?? 0) < (order._placed ?? 0);
+                });
+                if (exitFirst) {
                     order._deferredPastExits = context.idx;
                     // fills there later (a stop-limit is marked triggered by now)
                     (order as any)._deferredFillPrice = fillPrice;
                     continue;
+                }
+                const seen = new Set<string>();
+                for (const leg of legs) {
+                    const key = `${leg.order._placed}:${leg.trade.id}`;
+                    if (tied(leg) && !seen.has(key)) {
+                        seen.add(key);
+                        tiedExits.push({ order: leg.order, trade: leg.trade });
+                    }
                 }
             }
         }
@@ -771,7 +822,24 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
         }
 
         if (shouldFill) {
+            const tiedQty = tiedExits.map(({ trade }) => Math.abs(trade.size));
             fillEntryOrder(context, order, fillPrice, currentTime, openPrice);
+            if ((order.status as Order['status']) === 'filled') {
+                tiedExits.forEach(({ order: exit, trade }, i) => {
+                    if (strategy.opentrades.includes(trade) || !(tiedQty[i] > 1e-9)) return;
+                    const fill: Order = {
+                        id: exit.id,
+                        comment: exit.comment,
+                        direction: -Math.sign(trade.size),
+                        qty: tiedQty[i],
+                        type: exit.stop !== undefined || exit.loss !== undefined ? 'stop' : 'limit',
+                        bar: context.idx,
+                        time: currentTime,
+                        status: 'pending',
+                    } as Order;
+                    fillEntryOrder(context, fill, fillPrice, currentTime, openPrice);
+                });
+            }
             if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) applyOca(strategy, order);
             // A limit / stop fill at its level inside the bar: tag the trades it opened, so their exits
             // on this bar only see the path after the fill (see entryBarPathExit).

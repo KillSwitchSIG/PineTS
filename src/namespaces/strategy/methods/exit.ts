@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { roundToMintick, roundOrderLevel, parseDirection } from '../utils';
+import { roundToMintick, roundOrderLevel, parseDirection, placeOrder } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -190,6 +190,6 @@ export function exit(context: any) {
         const seqKey = `${exitId}\u0000${fromEntryId}`;
         if (!seqs.has(seqKey)) seqs.set(seqKey, seqs.size + 1);
         order._seq = seqs.get(seqKey);
-        list.push(order);
+        placeOrder(context.strategy, order);
     };
 }
