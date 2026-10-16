@@ -101,6 +101,11 @@ export function exit(context: any) {
               );
         const attachedAtReversal = !!pendingEntry?._isReversalEntry;
 
+        // An exit for an entry id that is neither open nor pending when it is called places nothing
+        // (TradingView, BTCUSDT 1h / AAPL 1D: `strategy.exit("x", "D", ...)` called once just before
+        // `strategy.entry("D", ...)` never fires, 0 / 74).
+        if (fromEntryId && !pendingEntry && !(context.strategy.opentrades as any[]).some((t) => t.entry_id === fromEntryId)) return;
+
         // Limit / stop levels go on the mintick grid by the exit's side, as entry levels do (TV, AAPL
         // 1D: a short's stop at 53.4925 placed with the close at 53.5425 works at 53.50). Without a
         // position or entry to tell the side, and for trail_price, they round away from the close
