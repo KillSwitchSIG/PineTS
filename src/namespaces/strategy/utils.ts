@@ -2453,35 +2453,35 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             const slHit =
                 sl !== undefined && (phase === 'open' ? (isLong ? openPrice <= sl : openPrice >= sl) : isLong ? lowPrice <= sl : highPrice >= sl);
 
-            // OCO per trade: when both legs are reachable within the bar,
-            // the leg crossed FIRST along the assumed intra-bar path wins
-            // (favorable-first → TP, adverse-first → SL).
+            const openPastSl = sl !== undefined && (isLong ? openPrice <= sl : openPrice >= sl);
+            const openPastTp = tp !== undefined && (isLong ? openPrice >= tp + limitSlack : openPrice <= tp - limitSlack);
+
+            // TV asymmetry: a BUY-stop (the SL leg of a SHORT) already past at the open does not
+            // catch a short ADDED at that same open to a short held before the bar, and that add
+            // leaves the exit for good, take-profit included (BTCUSDT 1h / AAPL 1D, pyramiding 2: the
+            // held trade exits, the add is closed by close_all later, 297 / 299). Sell-stops and
+            // both-side limits always catch, and so does a buy-stop for a short opened from flat
+            // (market, stop and limit entries with their exit stop below the fill exit at the fill,
+            // 100 / 100 each).
+            if (slHit && openPastSl && !isLong && t.entry_bar_index === context.idx) {
+                const preFill = (strategy as any)._preFillSize;
+                if ((preFill?.idx === context.idx ? preFill.size : 0) < 0) {
+                    (t._exits_filled ??= new Set()).add(order.id);
+                    continue;
+                }
+            }
+
+            // OCO per trade: when both legs are reachable within the bar, a leg the bar opens past
+            // fills at the open (TV, AAPL 1D: a short's stop breached at the open fills there before a
+            // take-profit the bar reaches later); otherwise the leg crossed FIRST along the assumed
+            // intra-bar path wins (favorable-first → TP, adverse-first → SL).
             let kind: 'profit' | 'loss' | null = null;
-            if (tpHit && slHit) kind = favorableFirst ? 'profit' : 'loss';
+            if (tpHit && slHit) kind = openPastSl ? 'loss' : openPastTp ? 'profit' : favorableFirst ? 'profit' : 'loss';
             else if (tpHit) kind = 'profit';
             else if (slHit) kind = 'loss';
 
-            if (kind === 'loss') {
-                const openPastSl = isLong ? openPrice <= (sl as number) : openPrice >= (sl as number);
-                // TV asymmetry: a BUY-stop (the SL leg of a SHORT) already past at the open does not
-                // catch a short ADDED at that same open to a short held before the bar (BTCUSDT 1h /
-                // AAPL 1D, pyramiding 2: the held trade exits, the add is spared, 150 / 150), while
-                // sell-stops and both-side limits always catch. A short opened from flat is caught
-                // (market, stop and limit entries with their exit stop below the fill exit at the
-                // fill, 100 / 100 each). For a spared trade the TP leg (if reachable) still applies.
-                const preFill = (strategy as any)._preFillSize;
-                const heldShort = (preFill?.idx === context.idx ? preFill.size : 0) < 0;
-                const buyStopSparesFreshEntry = !isLong && openPastSl && t.entry_bar_index === context.idx && heldShort;
-                if (!buyStopSparesFreshEntry) {
-                    slEvents.push({ qty: tQty, price: openPastSl ? openPrice : (sl as number), kind: 'loss', tradeId: t.id });
-                } else if (tpHit) {
-                    kind = 'profit';
-                }
-            }
-            if (kind === 'profit') {
-                const openPastTp = isLong ? openPrice >= (tp as number) + limitSlack : openPrice <= (tp as number) - limitSlack;
-                tpEvents.push({ qty: tQty, price: openPastTp ? openPrice : (tp as number), kind: 'profit', tradeId: t.id });
-            }
+            if (kind === 'loss') slEvents.push({ qty: tQty, price: openPastSl ? openPrice : (sl as number), kind: 'loss', tradeId: t.id });
+            if (kind === 'profit') tpEvents.push({ qty: tQty, price: openPastTp ? openPrice : (tp as number), kind: 'profit', tradeId: t.id });
         }
 
         // Crossing order within each leg: the TP leg is crossed while
