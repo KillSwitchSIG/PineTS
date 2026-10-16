@@ -57,6 +57,13 @@ export interface StrategyConfig {
 export interface Trade {
     id: string; // unique trade id (internal)
     _exits_filled?: Set<string>; // ids of strategy.exit orders that already closed part of this trade
+    // Excursion tracking on the bar path (see excOpen / excEndBar in utils.ts): per-unit best
+    // favourable / worst adverse move, path position observed up to, and where the trade opened.
+    _fav?: number;
+    _adv?: number;
+    _obsFrom?: number;
+    _openBar?: number;
+    _openAt?: number;
     _entry_qty?: number; // size when the trade opened (base of strategy.exit qty_percent)
     entry_id: string; // id passed to strategy.entry()
     entry_price: number;
