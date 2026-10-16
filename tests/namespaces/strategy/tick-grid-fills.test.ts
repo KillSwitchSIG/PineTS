@@ -196,6 +196,28 @@ describe('same-point fills', () => {
         expect(s.opentrades).toHaveLength(0);
     });
 
+    it('a market entry fills at the open before an older stop entry the bar opens past', async () => {
+        // AAPL / NVDA / TSLA 1D: a short stop entry queued earlier and a market long queued on the
+        // previous bar, the bar gapping below the stop: the long fills first, then the short (queued
+        // flat, quantity 1) closes it
+        const ctx = await run(
+            `if bar_index == 0
+    strategy.entry("S", strategy.short, stop = 99)
+if bar_index == 1
+    strategy.entry("L", strategy.long)`,
+            [
+                [100, 100.5, 99.5, 100],
+                [100, 100.5, 99.5, 100],
+                [98, 98.5, 97.5, 98],
+                [98, 98.5, 97.5, 98],
+            ],
+        );
+        const s = ctx.strategy!;
+        expect(s.closedtrades[0].entry_id).toBe('L');
+        expect(s.closedtrades[0].exit_id).toBe('S');
+        expect(s.opentrades).toHaveLength(0);
+    });
+
     it('an exit stop already breached when a short opens from flat exits at the entry fill', async () => {
         // BINANCE:BTCUSDT 1h / AAPL / NVDA 1D: market, stop and limit shorts with their exit stop below
         // the fill all exit at the fill (100 / 100 each)

@@ -651,10 +651,12 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
     // order they were placed in (TV, AAPL / NVDA / TSLA 1D, a stop and a limit at the close, ~1,600
     // events: a buy stop before a sell limit at a gap-up open or both at 28.50 on the way up, a sell
     // stop before a buy limit at a gap-down open).
-    const limitLast = (o: Order) => (o.type === 'limit' && (o.category ?? 'entry') !== 'exit' ? 1 : 0);
+    // Market orders fill at the open before the stops and limits the bar opens past (TV, AAPL / NVDA
+    // / TSLA 1D: a market long and an older short stop entry gapped through fill long first).
+    const typeRank = (o: Order) => ((o.category ?? 'entry') === 'exit' ? 0 : o.type === 'market' ? 0 : o.type === 'limit' ? 2 : 1);
     const queue = pending_orders
         .map((o, i) => ({ o, i, at: fillAt(o) }))
-        .sort((a, b) => a.at - b.at || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || limitLast(a.o) - limitLast(b.o) || a.i - b.i)
+        .sort((a, b) => a.at - b.at || typeRank(a.o) - typeRank(b.o) || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
         .map((x) => x.o);
     // The position held before this bar's fills: margin is checked against it (see fillEntryOrder).
     if (!deferredOnly) (strategy as any)._preFillSize = { idx: context.idx, size: strategy.position_size };
