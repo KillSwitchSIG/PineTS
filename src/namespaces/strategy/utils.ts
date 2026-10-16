@@ -62,9 +62,45 @@ export function tickLevel(base: number, ticks: number, mintick: number): number 
     const n = base / mintick + ticks;
     const r = Math.round(n);
     if (Math.abs(n - r) > 1e-6) return raw;
+    return gridPrice(r, mintick);
+}
+
+function gridPrice(ticks: number, mintick: number): number {
     const s = String(mintick);
     const decimals = s.includes('e-') ? Number(s.split('e-')[1]) + (s.split('e-')[0].split('.')[1]?.length ?? 0) : (s.split('.')[1]?.length ?? 0);
-    return Number((r * mintick).toFixed(decimals));
+    return Number((ticks * mintick).toFixed(decimals));
+}
+
+/**
+ * `price` moved to the nearest price on the tick grid. Split / dividend adjusted equity feeds carry
+ * prices off the grid (AAPL 40.8125 with a 0.01 tick); TradingView's broker trades them at the
+ * nearest tick (40.81) while the script still sees the raw value.
+ */
+export function snapToTick(price: number, mintick: number): number {
+    if (!mintick || mintick <= 0 || !Number.isFinite(price)) return price;
+    return gridPrice(Math.round(price / mintick), mintick);
+}
+
+/** A bar price as the broker sees it: on the tick grid unless PineTS.setFillsOnTickGrid(false). */
+export function brokerPrice(context: any, price: number): number {
+    return context._fillsOnTickGrid ? snapToTick(price, context.pine?.syminfo?.mintick) : price;
+}
+
+/**
+ * The trailing stop's view of an off-grid bar (broker on the tick grid): its peak follows the raw
+ * high / low, and its trigger rounds to the grid away from the market. TradingView, AAPL 1h, mintick
+ * 0.01, 114-tick offset: high 233.405 (traded as 233.41) fires a long's trail at 232.26 = floor(233.405
+ * - 1.14); AAPL 1D, 37-tick offset: low 71.5325 fires a short's trail at 71.91 = ceil(71.5325 + 0.37).
+ */
+function offGridTrail(context: any): { peakAt: (p: number) => number } | undefined {
+    const mintick = context.pine?.syminfo?.mintick;
+    if (!context._fillsOnTickGrid || !mintick) return undefined;
+    const raw = context._rawBar;
+    if (!raw) return { peakAt: (p: number) => p };
+    const high = snapToTick(raw.high, mintick);
+    const low = snapToTick(raw.low, mintick);
+    const open = snapToTick(raw.open, mintick);
+    return { peakAt: (p: number) => (p === high ? raw.high : p === low ? raw.low : p === open ? raw.open : p) };
 }
 
 /**
@@ -99,7 +135,21 @@ export function roundToMintick(price: number, referencePrice: number, mintick: n
     // 85,311.7699999999, and TradingView fills `close + 0.2 * atr` = 64,277.98000025 (2.5e-5 ticks
     // above the grid) at 64,277.98, not 64,277.99.
     const EPS = 1e-4;
-    return price > referencePrice ? Math.ceil(ticks - EPS) * mintick : Math.floor(ticks + EPS) * mintick;
+    return gridPrice(price > referencePrice ? Math.ceil(ticks - EPS) : Math.floor(ticks + EPS), mintick);
+}
+
+/**
+ * An entry's limit / stop level on the mintick grid, rounded by the order's side whatever the
+ * market: a buy limit rounds down, a buy stop up, a sell limit up, a sell stop down. This matches
+ * roundToMintick for an order away from the market and differs for a marketable one (TradingView,
+ * NVDA 1D: a buy limit at 23.487 placed with the close at 23.288 works at 23.48, not 23.49).
+ */
+export function roundOrderLevel(price: number, dir: number, kind: 'limit' | 'stop', mintick: number): number {
+    if (!mintick || mintick <= 0 || !Number.isFinite(price)) return price;
+    const ticks = price / mintick;
+    const EPS = 1e-4;
+    const up = (kind === 'stop') === (dir === 1);
+    return gridPrice(up ? Math.ceil(ticks - EPS) : Math.floor(ticks + EPS), mintick);
 }
 
 /**
@@ -233,10 +283,15 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
 /**
  * The price cash / percent-of-equity sizing uses: the stop price of a stop or stop-limit order,
  * the limit price of a limit order, else `fallback` (the signal bar's close). An na leg is absent.
+ * `dir` is the order's side (1 buy, -1 sell).
  */
-export function sizingPrice(stop: number | undefined, limit: number | undefined, fallback: number): number {
+export function sizingPrice(stop: number | undefined, limit: number | undefined, fallback: number, dir: number): number {
     const isPrice = (p: number | undefined): p is number => typeof p === 'number' && Number.isFinite(p);
-    return isPrice(stop) ? stop : isPrice(limit) ? limit : fallback;
+    // An order already marketable at the close is sized there, as a market order (TV, TSLA 1D: a buy
+    // limit at 13.66 placed with the close at 13.48 is sized at 13.48).
+    if (isPrice(stop)) return (dir === 1 ? fallback >= stop : fallback <= stop) ? fallback : stop;
+    if (isPrice(limit)) return (dir === 1 ? fallback <= limit : fallback >= limit) ? fallback : limit;
+    return fallback;
 }
 
 /**
@@ -332,11 +387,17 @@ function pathPosition(path: number[], level: number, rising: boolean): number | 
 function walkTrail(
     path: number[],
     start: { at: number; price: number },
-    s: { armed: boolean; peak: number; armPrice?: number; offset: number; dir: number; mintick: number },
+    s: { armed: boolean; peak: number; armPrice?: number; offset: number; dir: number; mintick: number; offGrid?: { peakAt: (p: number) => number } },
 ): { fill?: { price: number; at: number }; armed: boolean; peak: number } {
     const { dir, mintick } = s;
     const u = (p: number) => dir * p; // favorable is up
-    const trigger = (peak: number) => tickLevel(peak, -dir * s.offset, mintick);
+    const trigger = (peak: number) => {
+        const level = tickLevel(peak, -dir * s.offset, mintick);
+        if (!s.offGrid || !mintick) return level;
+        const ticks = level / mintick;
+        return gridPrice(dir === 1 ? Math.floor(ticks + 1e-6) : Math.ceil(ticks - 1e-6), mintick);
+    };
+    const peakAt = s.offGrid?.peakAt ?? ((p: number) => p);
     let armed = s.armed;
     let peak = s.peak;
     const points: Array<{ at: number; price: number }> = [start];
@@ -344,6 +405,9 @@ function walkTrail(
 
     // At the start point: a gap past the trigger of an armed trail, or arming right there.
     if (armed && u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at }, armed, peak };
+    // A favorable gap moves the peak to the open (TV, AAPL 1D: a short's trail peaked at 125.60, the
+    // next bar opens at 123.76 and rallies: it fires at 123.76 + 0.65 = 124.41, not 125.60 + 0.65).
+    if (armed && u(peakAt(start.price)) > u(peak)) peak = peakAt(start.price);
     if (!armed && s.armPrice !== undefined && u(start.price) >= u(s.armPrice)) {
         armed = true;
         peak = start.price;
@@ -358,7 +422,7 @@ function walkTrail(
                 peak = s.armPrice;
                 if (s.offset <= 0) return { fill: { price: s.armPrice, at: pos(s.armPrice) }, armed, peak };
             }
-            if (armed && u(b.price) > u(peak)) peak = b.price;
+            if (armed && u(peakAt(b.price)) > u(peak)) peak = peakAt(b.price);
         } else if (armed && u(b.price) < u(a.price)) {
             const trig = trigger(peak);
             if (u(b.price) <= u(trig)) return { fill: { price: trig, at: pos(trig) }, armed, peak };
@@ -367,11 +431,22 @@ function walkTrail(
     return { armed, peak };
 }
 
+/** Where a trade's trailing stop starts walking the bar: a trade a limit / stop entry opened inside it only sees the path after its fill. */
+function trailStart(context: any, t: any, path: number[]): { at: number; price: number } {
+    const entered = t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
+    if (entered) {
+        const rising = !((entered.type === 'limit') === (entered.dir === 1));
+        const at = pathPosition(path, entered.level, rising);
+        if (at !== undefined) return { at, price: entered.level };
+    }
+    return { at: 0, price: path[0] };
+}
+
 /**
  * Earliest point on the path where a pending strategy.exit price leg of the open position fills
- * (stop / limit, or profit / loss ticks from each trade's entry). Trailing legs are not considered.
+ * (stop / limit, or profit / loss ticks from each trade's entry). Trailing legs count with `withTrail`.
  */
-function firstExitLegOnPath(context: any, path: number[]): number | undefined {
+function firstExitLegOnPath(context: any, path: number[], withTrail = false): number | undefined {
     const strategy: StrategyState = context.strategy;
     const dir = Math.sign(strategy.position_size);
     if (dir === 0) return undefined;
@@ -390,6 +465,11 @@ function firstExitLegOnPath(context: any, path: number[]): number | undefined {
             const sl = o.stop ?? (o.loss !== undefined ? entry - dir * o.loss * mintick : undefined);
             if (tp !== undefined) consider(pathPosition(path, tp + dir * slack, dir === 1));
             if (sl !== undefined) consider(pathPosition(path, sl, dir !== 1));
+            if (withTrail && o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
+                const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
+                const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
+                consider(walkTrail(path, trailStart(context, t, path), { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) }).fill?.at);
+            }
         }
     }
     return first;
@@ -466,7 +546,7 @@ function exitFirstLegAt(context: any, o: Order, path: number[]): number {
         if (o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
             const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
             const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
-            const walk = walkTrail(path, { at: 0, price: path[0] }, { ...state, armPrice, offset: o.trail_offset, dir, mintick });
+            const walk = walkTrail(path, { at: 0, price: path[0] }, { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) });
             if (walk.fill) first = Math.min(first, walk.fill.at);
         }
     }
@@ -551,9 +631,14 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
     // they were placed in (TV: strategy.order / strategy.entry short then long, or long then short,
     // both fill the long first).
     const sideAtOpen = (o: Order, at: number) => (at === 0 && o.type === 'market' && (o.category ?? 'entry') !== 'exit' ? (parseDirection(o.direction) === 1 ? 0 : 1) : 0);
+    // A stop and a limit reached at the same point fill stop first, whatever their sides and the
+    // order they were placed in (TV, AAPL / NVDA / TSLA 1D, a stop and a limit at the close, ~1,600
+    // events: a buy stop before a sell limit at a gap-up open or both at 28.50 on the way up, a sell
+    // stop before a buy limit at a gap-down open).
+    const limitLast = (o: Order) => (o.type === 'limit' && (o.category ?? 'entry') !== 'exit' ? 1 : 0);
     const queue = pending_orders
         .map((o, i) => ({ o, i, at: fillAt(o) }))
-        .sort((a, b) => a.at - b.at || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
+        .sort((a, b) => a.at - b.at || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || limitLast(a.o) - limitLast(b.o) || a.i - b.i)
         .map((x) => x.o);
     // The position held before this bar's fills: margin is checked against it (see fillEntryOrder).
     if (!deferredOnly) (strategy as any)._preFillSize = { idx: context.idx, size: strategy.position_size };
@@ -657,7 +742,7 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
             if (posDir !== 0 && posDir !== dir) {
                 const path = barPath(openPrice, highPrice, lowPrice, closePrice);
                 const entryAt = pathPosition(path, fillPrice, order.type === 'limit' ? dir === -1 : dir === 1);
-                const exitAt = firstExitLegOnPath(context, path);
+                const exitAt = firstExitLegOnPath(context, path, true);
                 if (entryAt !== undefined && exitAt !== undefined && exitAt < entryAt) {
                     order._deferredPastExits = context.idx;
                     // fills there later (a stop-limit is marked triggered by now)
@@ -2378,15 +2463,15 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
 
             if (kind === 'loss') {
                 const openPastSl = isLong ? openPrice <= (sl as number) : openPrice >= (sl as number);
-                // TV asymmetry (637-event census from the gap_precedence
-                // probe, BTCUSDT 1D): a BUY-stop — the SL leg of a SHORT
-                // position — that is already in-the-money at the open does
-                // NOT catch a trade that entered at that same open
-                // (spared 234/234), while sell-stops and both-side limits
-                // always catch (403/403). Suppress the stop leg for
-                // same-bar short entries gapped past at the open; the TP
-                // leg (if also reachable) still applies.
-                const buyStopSparesFreshEntry = !isLong && openPastSl && t.entry_bar_index === context.idx;
+                // TV asymmetry: a BUY-stop (the SL leg of a SHORT) already past at the open does not
+                // catch a short ADDED at that same open to a short held before the bar (BTCUSDT 1h /
+                // AAPL 1D, pyramiding 2: the held trade exits, the add is spared, 150 / 150), while
+                // sell-stops and both-side limits always catch. A short opened from flat is caught
+                // (market, stop and limit entries with their exit stop below the fill exit at the
+                // fill, 100 / 100 each). For a spared trade the TP leg (if reachable) still applies.
+                const preFill = (strategy as any)._preFillSize;
+                const heldShort = (preFill?.idx === context.idx ? preFill.size : 0) < 0;
+                const buyStopSparesFreshEntry = !isLong && openPastSl && t.entry_bar_index === context.idx && heldShort;
                 if (!buyStopSparesFreshEntry) {
                     slEvents.push({ qty: tQty, price: openPastSl ? openPrice : (sl as number), kind: 'loss', tradeId: t.id });
                 } else if (tpHit) {
@@ -2441,18 +2526,11 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         if (phase === 'intrabar' && !mcLocked && order.trail_offset !== undefined && (order.trail_price !== undefined || order.trail_points !== undefined)) {
             const states = (order._trailByTrade ??= {});
             for (const t of matching) {
-                // A trade a limit / stop entry opened inside this bar only sees the path after its fill.
-                const entered = t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
-                let start: { at: number; price: number } = { at: 0, price: openPrice };
-                if (entered) {
-                    const rising = !((entered.type === 'limit') === (entered.dir === 1));
-                    const at = pathPosition(path, entered.level, rising);
-                    if (at !== undefined) start = { at, price: entered.level };
-                }
+                const start = trailStart(context, t, path);
                 const state = states[t.id] ?? { armed: false, peak: NaN };
                 const armPrice =
                     order.trail_price ?? tickLevel(t._bracket_entry ?? t.entry_price, isLong ? (order.trail_points as number) : -(order.trail_points as number), mintick);
-                const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick });
+                const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick, offGrid: offGridTrail(context) });
                 states[t.id] = { armed: fired.armed, peak: fired.peak };
                 const tQty = capacity.perTrade.get(t) ?? 0;
                 if (fired.fill && tQty > 1e-9) trailEvents.push({ qty: tQty, price: fired.fill.price, kind: 'trailing', at: fired.fill.at, tradeId: t.id });

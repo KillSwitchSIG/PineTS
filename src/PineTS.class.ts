@@ -6,9 +6,11 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processBarOrders, barPath, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState } from './namespaces/strategy/utils';
+import { processBarOrders, barPath, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
+
+type OHLC = { open: number; high: number; low: number; close: number };
 
 function getTimeframeDurationMs(timeframe: string | undefined): number {
     const tf = parseTimeframe(timeframe);
@@ -92,6 +94,21 @@ export class PineTS {
      */
     public setMaxLoops(maxLoops: number) {
         this._maxLoops = maxLoops;
+    }
+
+    private _fillsOnTickGrid: boolean = true;
+
+    /**
+     * Whether the strategy broker trades on the symbol's tick grid (default: true).
+     * Split / dividend adjusted feeds (US equities) carry prices between ticks, e.g. AAPL
+     * 40.8125 with a 0.01 tick. TradingView's broker moves every bar price to the nearest tick
+     * (40.81) before using it for fills, order triggers, trailing stops, margin checks and
+     * sizing, while the script keeps seeing the raw prices. Prices already on the grid are
+     * unaffected. Disable to have the broker use the raw feed prices.
+     * @param enabled Snap broker prices to the tick grid
+     */
+    public setFillsOnTickGrid(enabled: boolean) {
+        this._fillsOnTickGrid = enabled;
     }
 
     private _alertMode: 'realtime' | 'all' = 'realtime';
@@ -1102,6 +1119,7 @@ export class PineTS {
 
         context.__maxLoops = this._maxLoops;
         context._alertMode = this._alertMode;
+        context._fillsOnTickGrid = this._fillsOnTickGrid;
 
         // User-explicit prop overrides flow from the Indicator to the runtime.
         // Read by Core.indicator() and initializeStrategy/strategy.any() to
@@ -1139,11 +1157,13 @@ export class PineTS {
      * Each path segment is given to the broker as a bar of its own, opening at the segment's start.
      * @private
      */
-    private async _processBarWithOrderFills(context: Context, transpiledFn: Function): Promise<void> {
+    private async _processBarWithOrderFills(context: Context, transpiledFn: Function, rawBar: OHLC | null): Promise<void> {
         const strategy: any = context.strategy;
         const d: any = context.data;
         const last = d.close.data.length - 1;
         const real = { open: d.open.data[last], high: d.high.data[last], low: d.low.data[last], close: d.close.data[last] };
+        // The script sees the raw bar; the broker its tick-grid copy (see _snapBarForBroker).
+        const scriptBar = rawBar ?? real;
         const setBar = (open: number, high: number, low: number, close: number) => {
             d.open.data[last] = open;
             d.high.data[last] = high;
@@ -1163,7 +1183,7 @@ export class PineTS {
             for (const t of strategy.opentrades) if (t._intrabarEntry?.bar === context.idx) t._intrabarEntry = undefined;
             if (k === path.length - 1 || (strategy._fillCount ?? 0) === fills) continue;
 
-            setBar(real.open, real.high, real.low, real.close);
+            setBar(scriptBar.open, scriptBar.high, scriptBar.low, scriptBar.close);
             if (!snapshot) {
                 snapshot = this._snapshotVarState(context);
                 snapshot.strategy = null;
@@ -1187,6 +1207,39 @@ export class PineTS {
         }
         setBar(real.open, real.high, real.low, real.close);
         if (snapshot) context._execTick = (context._execTick || 0) + 1;
+    }
+
+    /**
+     * Moves the current bar's prices onto the tick grid for the broker (see setFillsOnTickGrid).
+     * Returns the raw prices to restore before the script runs, or null when nothing moved.
+     * @private
+     */
+    private _snapBarForBroker(context: Context): OHLC | null {
+        if (!this._fillsOnTickGrid || !context.strategy) return null;
+        const mintick = context.pine?.syminfo?.mintick;
+        if (!mintick || mintick <= 0) return null;
+        const d: any = context.data;
+        const last = d.close.data.length - 1;
+        const raw = { open: d.open.data[last], high: d.high.data[last], low: d.low.data[last], close: d.close.data[last] };
+        const snapped = { open: snapToTick(raw.open, mintick), high: snapToTick(raw.high, mintick), low: snapToTick(raw.low, mintick), close: snapToTick(raw.close, mintick) };
+        if (snapped.open === raw.open && snapped.high === raw.high && snapped.low === raw.low && snapped.close === raw.close) return null;
+        this._setBar(context, snapped);
+        context._rawBar = raw;
+        return raw;
+    }
+
+    private _restoreRawBar(context: Context, raw: OHLC): void {
+        this._setBar(context, raw);
+        context._rawBar = undefined;
+    }
+
+    private _setBar(context: Context, bar: OHLC): void {
+        const d: any = context.data;
+        const last = d.close.data.length - 1;
+        d.open.data[last] = bar.open;
+        d.high.data[last] = bar.high;
+        d.low.data[last] = bar.low;
+        d.close.data[last] = bar.close;
     }
 
     /**
@@ -1231,14 +1284,16 @@ export class PineTS {
                 // a reversal queued at that close (qty frozen at queue
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
+                const rawBar = this._snapBarForBroker(context);
                 riskStartBar(context);
                 applyPendingCloseMarginCall(context);
-                if (context.strategy.config?.calc_on_order_fills) await this._processBarWithOrderFills(context, transpiledFn);
+                if (context.strategy.config?.calc_on_order_fills) await this._processBarWithOrderFills(context, transpiledFn, rawBar);
                 else processBarOrders(context);
                 // Latch max_drawdown / max_runup ONCE at the end of the bar so
                 // trades closed mid-bar by TP / SL contribute their realized
                 // P&L (not phantom intra-bar excursions against the raw H/L).
                 finalizeStrategyBar(context);
+                if (rawBar) this._restoreRawBar(context, rawBar);
             }
 
             const result = await transpiledFn(context);
@@ -1249,8 +1304,12 @@ export class PineTS {
             // logged position excludes it) and before the orders filling at the close: a position
             // opened at the close is first checked at the next open (TV, process_orders_on_close).
             // A scheduled phantom close call takes its place.
-            if (context.strategy && !(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
-            if (context.strategy) processOrdersOnClose(context);
+            if (context.strategy) {
+                const rawBar = this._snapBarForBroker(context);
+                if (!(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
+                processOrdersOnClose(context);
+                if (rawBar) this._restoreRawBar(context, rawBar);
+            }
 
             //collect results
             if (typeof result === 'object') {
