@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processBarOrders, barPath, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
+import { processBarOrders, barPath, beginStrategyBar, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1178,7 +1178,10 @@ export class PineTS {
             const to = path[k];
             setBar(from, Math.max(from, to), Math.min(from, to), to);
             const fills = strategy._fillCount ?? 0;
+            // Positions on the segment map onto the whole bar's path (excursions).
+            (context as any)._excSeg = k === 0 ? { offset: 0, scale: 0 } : { offset: k - 1, scale: 1 / 3 };
             processBarOrders(context);
+            (context as any)._excSeg = undefined;
             // A trade entered inside this segment starts its exit path there; later segments are whole.
             for (const t of strategy.opentrades) if (t._intrabarEntry?.bar === context.idx) t._intrabarEntry = undefined;
             if (k === path.length - 1 || (strategy._fillCount ?? 0) === fills) continue;
@@ -1285,6 +1288,7 @@ export class PineTS {
                 // time) overshoots by exactly the deferred quantity, as TV
                 // does.
                 const rawBar = this._snapBarForBroker(context);
+                beginStrategyBar(context);
                 riskStartBar(context);
                 applyPendingCloseMarginCall(context);
                 if (context.strategy.config?.calc_on_order_fills) await this._processBarWithOrderFills(context, transpiledFn, rawBar);
