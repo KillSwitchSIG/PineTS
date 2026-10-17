@@ -442,12 +442,14 @@ function walkTrail(
  * A strategy.exit's take-profit and stop-loss levels for one trade. Given both a price (limit / stop)
  * and a tick distance (profit / loss), the level expected to fill first is used, the nearer to the
  * entry (TV: a long from 64,296.59 with profit → 64,553.70 and limit 64,728.26 takes profit at 64,553.70).
+ * Pine v5 scripts keep the price legs (see Order._priceLegsWin).
  */
 function exitBracket(o: Order, entry: number, dir: number, mintick: number): { tp?: number; sl?: number } {
     const tpTicks = o.profit !== undefined ? tickLevel(entry, dir * o.profit, mintick) : undefined;
     const slTicks = o.loss !== undefined ? tickLevel(entry, -dir * o.loss, mintick) : undefined;
+    // Pine v5: the price leg wins ("the command ignores profit if the limit value is not na").
     const nearer = (a: number | undefined, b: number | undefined, pick: (x: number, y: number) => number) =>
-        a === undefined ? b : b === undefined ? a : pick(a, b);
+        a === undefined ? b : b === undefined || o._priceLegsWin ? a : pick(a, b);
     return {
         tp: nearer(o.limit, tpTicks, dir === 1 ? Math.min : Math.max),
         sl: nearer(o.stop, slTicks, dir === 1 ? Math.max : Math.min),
@@ -458,7 +460,7 @@ function exitBracket(o: Order, entry: number, dir: number, mintick: number): { t
 export function trailArmPrice(o: Order, entry: number, dir: number, mintick: number): number {
     const byPoints = o.trail_points !== undefined ? tickLevel(entry, dir * (o.trail_points as number), mintick) : undefined;
     if (o.trail_price === undefined) return byPoints as number;
-    if (byPoints === undefined) return o.trail_price;
+    if (byPoints === undefined || o._priceLegsWin) return o.trail_price;
     return dir === 1 ? Math.min(o.trail_price, byPoints) : Math.max(o.trail_price, byPoints);
 }
 

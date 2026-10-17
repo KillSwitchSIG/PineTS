@@ -90,6 +90,19 @@ describe('strategy.exit levels', () => {
         expect(s.closedtrades[0].exit_price).toBe(100.5);
     });
 
+    it('Pine v5: the limit wins over profit (the command ignores profit when limit is not na)', async () => {
+        const bars = [flat, [100, 100.2, 99.8, 100], [100, 101.5, 99.9, 101.2], flat].map(([open, high, low, close], i) => ({ openTime: (i + 1) * 3_600_000, closeTime: (i + 2) * 3_600_000 - 1, open, high, low, close, volume: 1 }));
+        const sym = { tickerid: 'TEST:X', ticker: 'X', root: 'X', prefix: 'TEST', type: 'crypto' as const, currency: 'USD', timezone: 'UTC', mintick: 0.01, pointvalue: 1, mincontract: 0.001, minmove: 1, pricescale: 100, session: '24x7', description: 'X' };
+        const provider = { configure() {}, getSymbolInfo: async () => sym, getMarketData: async () => bars };
+        const src = `//@version=5
+strategy("v5 precedence", default_qty_type = strategy.fixed, default_qty_value = 1)
+if bar_index == 0
+    strategy.entry("L", strategy.long)
+    strategy.exit("x", "L", profit = 50, limit = 101)`;
+        const ctx = await new PineTS(provider, 'TEST:X', '60', bars.length, undefined, bars[bars.length - 1].closeTime).run(new Indicator(src));
+        expect(ctx.strategy!.closedtrades[0].exit_price).toBe(101);
+    });
+
     it('loss and stop: the stop nearer to the entry', async () => {
         const s = await run(
             `if bar_index == 0

@@ -159,6 +159,7 @@ export function exit(context: any) {
             trail_points: trailPoints,
             trail_offset: trailOffset,
             oca_name: extractValue(parsed.oca_name),
+            _priceLegsWin: context.pineVersion === 5,
             // an exit's orders belong to its OCA group as strategy.oca.reduce members
             oca_type: extractValue(parsed.oca_name) ? 'reduce' : undefined,
             comment: extractValue(parsed.comment),
