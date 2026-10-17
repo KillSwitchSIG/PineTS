@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
-import { roundToMintick, roundOrderLevel, parseDirection, placeOrder } from '../utils';
+import { roundToMintick, roundOrderLevel, parseDirection, placeOrder, floorQty, trailArmPrice } from '../utils';
 
 /**
  * Pine signature (21 named args):
@@ -145,7 +145,8 @@ export function exit(context: any) {
         const order: Order = {
             id: exitId,
             direction: 0,           // resolved at trigger based on matching trades
-            qty: qty !== undefined && !isNaValue(qty) ? Math.abs(Number(qty)) : 0,
+            // floored to the symbol's step; 0 is the whole position (TV, AAPL: qty = 0.5 exits all 4)
+            qty: qty !== undefined && qty !== null && !isNaValue(qty) ? floorQty(context, Math.abs(Number(qty))) : 0,
             qty_percent: isNaValue(qtyPercent) ? undefined : qtyPercent,
             type: 'market',
             bar: context.idx,
@@ -158,6 +159,8 @@ export function exit(context: any) {
             trail_points: trailPoints,
             trail_offset: trailOffset,
             oca_name: extractValue(parsed.oca_name),
+            // an exit's orders belong to its OCA group as strategy.oca.reduce members
+            oca_type: extractValue(parsed.oca_name) ? 'reduce' : undefined,
             comment: extractValue(parsed.comment),
             comment_profit: extractValue(parsed.comment_profit),
             comment_loss: extractValue(parsed.comment_loss),
@@ -183,6 +186,19 @@ export function exit(context: any) {
         // (trail_points, trail_offset, limit, stop, etc.) are refreshed.
         const trails = replaced.find((o) => o._trailByTrade);
         if (trails) order._trailByTrade = { ...trails._trailByTrade };
+        // A trail whose activation level the close has already reached is active from that close,
+        // with the close as its peak (TV, ES: a short's trail activating at 2,013 placed on a 1,994.5
+        // close, offset 4, fills at 1,998.5 on the next bar).
+        if (order.trail_offset !== undefined && (trailPrice !== undefined || trailPoints !== undefined)) {
+            const close = context._fillPointPrice ?? Series.from(context.data.close).get(0);
+            for (const t of context.strategy.opentrades as any[]) {
+                if (fromEntryId && t.entry_id !== fromEntryId) continue;
+                if (order._trailByTrade?.[t.id]?.armed) continue;
+                const dir = Math.sign(t.size);
+                const arm = trailArmPrice(order, t._bracket_entry ?? t.entry_price, dir, mintick);
+                if (Number.isFinite(close) && dir * (close - arm) >= 0) (order._trailByTrade ??= {})[t.id] = { armed: true, peak: close };
+            }
+        }
         // Placement order decides which exit's quantity is reserved first (see exitCapacity); a
         // re-call keeps the place of the exit it replaces.
         const strat = context.strategy as any;

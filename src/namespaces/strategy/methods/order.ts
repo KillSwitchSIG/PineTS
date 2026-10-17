@@ -123,10 +123,11 @@ export function order(context: any) {
             comment: commentValue,
         };
 
-        // An order with the id of a strategy.order still pending from an earlier bar modifies it
-        // instead of adding another (TV: a limit order re-placed every bar fills once).
+        // An order with the id of an unfilled strategy.order / strategy.entry modifies it instead of
+        // adding another, also on the bar it was placed (TV: order("O", qty = 1) then order("O", qty = 2)
+        // is one trade of 2; a limit order re-placed every bar fills once).
         context.strategy.pending_orders = context.strategy.pending_orders.filter(
-            (o: Order) => !(o.category === undefined && o.id === idValue && o.status === 'pending' && o.bar < context.idx),
+            (o: Order) => !((o.category === undefined || o.category === 'entry') && o.id === idValue && o.status === 'pending'),
         );
         placeOrder(context.strategy, orderObj);
 

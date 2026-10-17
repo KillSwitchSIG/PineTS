@@ -164,10 +164,11 @@ export function entry(context: any) {
             _reversesPending: isReversal && Math.sign(strategy.position_size) !== Math.sign(currentSize),
         } as any;
 
-        // An entry with the id of an entry order still pending from an earlier bar modifies that
-        // order: a limit entry re-placed every day replaces yesterday's instead of piling up.
+        // An entry with the id of an unfilled strategy.entry / strategy.order modifies that order, also
+        // on the bar it was placed (TV: entry("M") then entry("M", qty = 2) on one bar is one trade of 2;
+        // a limit entry moved away on the same bar never fills at the first level).
         strategy.pending_orders = strategy.pending_orders.filter(
-            (o: Order) => !(o.category === 'entry' && o.id === idValue && o.status === 'pending' && o.bar < context.idx),
+            (o: Order) => !((o.category === 'entry' || o.category === undefined) && o.id === idValue && o.status === 'pending'),
         );
         placeOrder(strategy, orderObj);
     };
