@@ -407,11 +407,18 @@ function walkTrail(
     if (armed && u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at, level: trigger(peak) }, armed, peak };
     // A favorable gap moves the peak to the open (TV, AAPL 1D: a short's trail peaked at 125.60, the
     // next bar opens at 123.76 and rallies: it fires at 123.76 + 0.65 = 124.41, not 125.60 + 0.65).
-    if (armed && u(peakAt(start.price)) > u(peak)) peak = peakAt(start.price);
+    if (armed && u(peakAt(start.price)) > u(peak)) {
+        peak = peakAt(start.price);
+        // With a zero offset the stop is then at the open itself (TV, BTC: a trail armed at a 63,650
+        // close fills at the 63,650.01 open).
+        if (u(start.price) <= u(trigger(peak))) return { fill: { price: start.price, at: start.at, level: trigger(peak) }, armed, peak };
+    }
     if (!armed && s.armPrice !== undefined && u(start.price) >= u(s.armPrice)) {
         armed = true;
         peak = peakAt(start.price);
-        if (s.offset <= 0) return { fill: { price: start.price, at: start.at, level: start.price }, armed, peak };
+        // Armed at a gapped open, a zero offset waits for the first adverse move (TV, AAPL: a long's
+        // trail armed at the 33.08 open fires at the 33.28 high it reaches first).
+        if (s.offset <= 0 && start.at > 0) return { fill: { price: start.price, at: start.at, level: start.price }, armed, peak };
     }
     for (let k = 0; k + 1 < points.length; k++) {
         const a = points[k], b = points[k + 1];
@@ -429,6 +436,32 @@ function walkTrail(
         }
     }
     return { armed, peak };
+}
+
+/**
+ * A strategy.exit's take-profit and stop-loss levels for one trade. Given both a price (limit / stop)
+ * and a tick distance (profit / loss), the level expected to fill first is used, the nearer to the
+ * entry (TV: a long from 64,296.59 with profit → 64,553.70 and limit 64,728.26 takes profit at 64,553.70).
+ * Pine v5 scripts keep the price legs (see Order._priceLegsWin).
+ */
+function exitBracket(o: Order, entry: number, dir: number, mintick: number): { tp?: number; sl?: number } {
+    const tpTicks = o.profit !== undefined ? tickLevel(entry, dir * o.profit, mintick) : undefined;
+    const slTicks = o.loss !== undefined ? tickLevel(entry, -dir * o.loss, mintick) : undefined;
+    // Pine v5: the price leg wins ("the command ignores profit if the limit value is not na").
+    const nearer = (a: number | undefined, b: number | undefined, pick: (x: number, y: number) => number) =>
+        a === undefined ? b : b === undefined || o._priceLegsWin ? a : pick(a, b);
+    return {
+        tp: nearer(o.limit, tpTicks, dir === 1 ? Math.min : Math.max),
+        sl: nearer(o.stop, slTicks, dir === 1 ? Math.max : Math.min),
+    };
+}
+
+/** A trailing exit's activation level for one trade: of trail_price and trail_points, the one reached first. */
+export function trailArmPrice(o: Order, entry: number, dir: number, mintick: number): number {
+    const byPoints = o.trail_points !== undefined ? tickLevel(entry, dir * (o.trail_points as number), mintick) : undefined;
+    if (o.trail_price === undefined) return byPoints as number;
+    if (byPoints === undefined || o._priceLegsWin) return o.trail_price;
+    return dir === 1 ? Math.min(o.trail_price, byPoints) : Math.max(o.trail_price, byPoints);
 }
 
 /** Where a trade's trailing stop starts walking the bar: a trade a limit / stop entry opened inside it only sees the path after its fill. */
@@ -469,12 +502,11 @@ function exitLegsOnPath(context: any, path: number[], withTrail: boolean): Array
                 if (at !== undefined) legs.push({ at, level, order: o, trade: t });
             };
             const entry = t._bracket_entry ?? t.entry_price;
-            const tp = o.limit ?? (o.profit !== undefined ? entry + dir * o.profit * mintick : undefined);
-            const sl = o.stop ?? (o.loss !== undefined ? entry - dir * o.loss * mintick : undefined);
+            const { tp, sl } = exitBracket(o, entry, dir, mintick);
             if (tp !== undefined) consider(pathPosition(path, tp + dir * slack, dir === 1), tp);
             if (sl !== undefined) consider(pathPosition(path, sl, dir !== 1), sl);
             if (withTrail && o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
-                const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
+                const armPrice = trailArmPrice(o, entry, dir, mintick);
                 const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
                 const fill = walkTrail(path, trailStart(context, t, path), { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) }).fill;
                 if (fill) consider(fill.at, fill.level);
@@ -513,12 +545,16 @@ function entryPathPosition(o: Order, fillPrice: number | undefined, path: number
  * A filled OCA order acts on the other pending orders of its group: strategy.oca.cancel cancels
  * them, strategy.oca.reduce takes the filled quantity off them (cancelled when nothing is left).
  */
-function applyOca(strategy: StrategyState, filled: Order): void {
-    const qty = Math.abs((filled as any)._base_qty ?? filled.qty);
+function applyOca(strategy: StrategyState, filled: Order, filledQty?: number): void {
+    const qty = filledQty ?? Math.abs((filled as any)._base_qty ?? filled.qty);
     for (const o of strategy.pending_orders) {
-        if (o === filled || o.status !== 'pending' || o.oca_name !== filled.oca_name) continue;
+        // A group is its name and its type together (TV: a reduce-type and a cancel-type order sharing a
+        // name both fill).
+        if (o === filled || o.status !== 'pending' || o.oca_name !== filled.oca_name || o.oca_type !== filled.oca_type) continue;
         if (filled.oca_type === 'cancel') o.status = 'cancelled';
-        else {
+        else if ((o.category ?? 'entry') === 'exit' && !(o.qty > 0)) {
+            // an exit without a fixed quantity covers whatever is left: nothing to take off it
+        } else {
             o.qty = Math.max(0, o.qty - qty);
             if ((o as any)._base_qty !== undefined) (o as any)._base_qty = Math.max(0, (o as any)._base_qty - qty);
             if (o.qty <= 1e-9) o.status = 'cancelled';
@@ -555,12 +591,11 @@ function exitFirstLegAt(context: any, o: Order, path: number[]): number {
         if (o.from_entry && t.entry_id !== o.from_entry) continue;
         const dir = Math.sign(t.size);
         const entry = t._bracket_entry ?? t.entry_price;
-        const tp = o.limit ?? (o.profit !== undefined ? tickLevel(entry, dir * o.profit, mintick) : undefined);
-        const sl = o.stop ?? (o.loss !== undefined ? tickLevel(entry, -dir * o.loss, mintick) : undefined);
+        const { tp, sl } = exitBracket(o, entry, dir, mintick);
         if (tp !== undefined) first = Math.min(first, pathPosition(path, tp + dir * slack, dir === 1) ?? Infinity);
         if (sl !== undefined) first = Math.min(first, pathPosition(path, sl, dir !== 1) ?? Infinity);
         if (o.trail_offset !== undefined && (o.trail_price !== undefined || o.trail_points !== undefined)) {
-            const armPrice = o.trail_price ?? tickLevel(entry, dir * (o.trail_points as number), mintick);
+            const armPrice = trailArmPrice(o, entry, dir, mintick);
             const state = o._trailByTrade?.[t.id] ?? { armed: false, peak: NaN };
             const walk = walkTrail(path, { at: 0, price: path[0] }, { ...state, armPrice, offset: o.trail_offset, dir, mintick, offGrid: offGridTrail(context) });
             if (walk.fill) first = Math.min(first, walk.fill.at);
@@ -787,6 +822,7 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                     o !== order &&
                     o.status === 'pending' &&
                     o.oca_name === order.oca_name &&
+                    o.oca_type === order.oca_type &&
                     ocaGrouped(o) &&
                     (o.category ?? 'entry') !== 'exit' &&
                     o.bar < context.idx &&
@@ -1071,6 +1107,11 @@ export function processOrdersOnClose(context: any): void {
         } else if (onClose && (order.category ?? 'entry') === 'entry' && order.type === 'market') {
             markToMarket(context, closePrice);
             fillEntryOrder(context, order, closePrice, currentTime, closePrice);
+        } else if (onClose && (order.category ?? 'entry') !== 'exit' && marketableAtClose(order, closePrice)) {
+            // A limit / stop entry the close has already reached fills at that close (TV, zc01: a buy limit
+            // 50 ticks above the close, a sell stop above it… fill on the bar that placed them).
+            markToMarket(context, closePrice);
+            fillEntryOrder(context, order, closePrice, currentTime, closePrice);
         } else if (onClose && (order.category ?? 'entry') === 'exit') {
             fillExitAtClose(context, order, closePrice, currentTime);
         }
@@ -1079,6 +1120,14 @@ export function processOrdersOnClose(context: any): void {
     strategy.pending_orders = strategy.pending_orders.filter((o) => o.status === 'pending');
     markToMarket(context, closePrice);
     updateStrategyMetrics(context);
+}
+
+/** A limit / stop / stop-limit entry order whose level(s) the price has reached. */
+function marketableAtClose(order: Order, price: number): boolean {
+    const dir = parseDirection(order.direction);
+    const limitOk = order.limit === undefined || (dir === 1 ? price <= order.limit : price >= order.limit);
+    const stopOk = order.stop === undefined || (dir === 1 ? price >= order.stop : price <= order.stop);
+    return (order.type === 'limit' || order.type === 'stop' || order.type === 'stop-limit') && limitOk && stopOk;
 }
 
 /**
@@ -1100,8 +1149,7 @@ function fillExitAtClose(context: any, order: Order, closePrice: number, current
         if (cap <= 1e-9) break;
         if (t._exits_filled?.has(order.id) || !((capacity.perTrade.get(t) ?? 0) > 1e-9)) continue;
         const entry = t._bracket_entry ?? t.entry_price;
-        const tp = order.limit ?? (order.profit !== undefined ? entry + dir * order.profit * mintick : undefined);
-        const sl = order.stop ?? (order.loss !== undefined ? entry - dir * order.loss * mintick : undefined);
+        const { tp, sl } = exitBracket(order, entry, dir, mintick);
         const slHit = sl !== undefined && (dir === 1 ? closePrice <= sl : closePrice >= sl);
         const tpHit = !slHit && tp !== undefined && (dir === 1 ? closePrice >= tp : closePrice <= tp);
         if (!slHit && !tpHit) continue;
@@ -1110,6 +1158,7 @@ function fillExitAtClose(context: any, order: Order, closePrice: number, current
         const fillPrice = kind === 'loss' ? applySlippage(context, -dir, closePrice) : closePrice;
         const comment = kind === 'profit' ? (order.comment_profit ?? order.comment) : (order.comment_loss ?? order.comment);
         closeMatching(context, order.from_entry, qty, fillPrice, currentTime, { triggerKind: kind, exitId: order.id, exitComment: comment }, t.id);
+        if (order.oca_name && order.oca_type === 'reduce') applyOca(strategy, order, qty);
         (t._exits_filled ??= new Set()).add(order.id);
         cap -= qty;
         closed = true;
@@ -1735,8 +1784,13 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
         // Each row's excursion is its entry record's path moves up to this exit (see excClosedRow).
         const emitClosedRows = (qtyClosed: number) => {
             const commType = strategy.config.commission_type ?? 'percent';
-            const shareFlat = closeInfo?.isImplicitReversal && commType === 'cash_per_order';
-            const rawExitCommission = computeLegCommission(context, strategy, qtyClosed, exitPrice);
+            // A cash_per_order fee is the order's, shared by the trades it closes in proportion to their
+            // quantity (TV: close_all of two trades of 1 with a 5 fee charges 2.5 to each).
+            const perOrder = commType === 'cash_per_order';
+            const shareFlat = closeInfo?.isImplicitReversal && perOrder;
+            const rawExitCommission = perOrder
+                ? computeLegCommission(context, strategy, qtyToClose, exitPrice) * (qtyToClose > 0 ? qtyClosed / qtyToClose : 1)
+                : computeLegCommission(context, strategy, qtyClosed, exitPrice);
             const exitCommTotal = shareFlat ? rawExitCommission * (closeInfo?.reversalShare ?? 0.5) : rawExitCommission;
 
             const slices = consumeLedger(strategy, trade, qtyClosed);
@@ -2485,11 +2539,6 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         const avgEntry = totalCost / matchingQty;
         const isLong = matchingDir === 1;
 
-        // Shared absolute legs (validated below); per-trade tick legs are
-        // computed inside the bracket loop further down.
-        let absTp: number | undefined = order.limit;
-        let absSl: number | undefined = order.stop;
-
         // A stop / limit on the wrong side of the entry is kept: it is already breached and fills
         // at once (TV: an exit waiting for a long entry, its stop 64,066.01 above the 63,974.01
         // fill, closes the trade at that fill on the entry bar).
@@ -2568,23 +2617,13 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             const entry = t._bracket_entry ?? t.entry_price;
             const tQty = capacity.perTrade.get(t) ?? 0;
             if (!(tQty > 1e-9)) continue;
-            let tp = absTp;
-            if (tp === undefined && order.profit !== undefined) {
-                tp = tickLevel(entry, isLong ? order.profit : -order.profit, mintick);
-            }
-            let sl = absSl;
-            if (sl === undefined && order.loss !== undefined) {
-                sl = tickLevel(entry, isLong ? -order.loss : order.loss, mintick);
-            }
+            const { tp, sl } = exitBracket(order, entry, isLong ? 1 : -1, mintick);
 
-            // A trade a limit / stop entry opened inside this bar: only the path after the fill counts.
-            // Its absolute legs are taken as given (a leg on the wrong side of the fill exits at the
-            // fill), unless the exit was attached to a reversal (see the stale-attachment drop above).
+            // A trade a limit / stop entry opened inside this bar: only the path after the fill counts
+            // (a leg on the wrong side of the fill exits at the fill).
             const intrabar = phase === 'intrabar' && t._intrabarEntry?.bar === context.idx ? t._intrabarEntry : undefined;
             if (intrabar && !mcLocked) {
-                const pathTp = order._attachedAtReversal ? tp : (order.limit ?? tp);
-                const pathSl = order._attachedAtReversal ? sl : (order.stop ?? sl);
-                const hit = entryBarPathExit(intrabar, pathTp, pathSl, isLong, { open: openPrice, high: highPrice, low: lowPrice, close: closePrice }, limitSlack);
+                const hit = entryBarPathExit(intrabar, tp, sl, isLong, { open: openPrice, high: highPrice, low: lowPrice, close: closePrice }, limitSlack);
                 if (hit !== undefined) {
                     if (hit) (hit.kind === 'profit' ? tpEvents : slEvents).push({ qty: tQty, price: hit.price, kind: hit.kind, tradeId: t.id });
                     continue;
@@ -2677,8 +2716,7 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
             for (const t of matching) {
                 const start = trailStart(context, t, path);
                 const state = states[t.id] ?? { armed: false, peak: NaN };
-                const armPrice =
-                    order.trail_price ?? tickLevel(t._bracket_entry ?? t.entry_price, isLong ? (order.trail_points as number) : -(order.trail_points as number), mintick);
+                const armPrice = trailArmPrice(order, t._bracket_entry ?? t.entry_price, isLong ? 1 : -1, mintick);
                 const fired = walkTrail(path, start, { ...state, armPrice, offset: order.trail_offset as number, dir: isLong ? 1 : -1, mintick, offGrid: offGridTrail(context) });
                 states[t.id] = { armed: fired.armed, peak: fired.peak };
                 const tQty = capacity.perTrade.get(t) ?? 0;
@@ -2744,6 +2782,9 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
                     },
                     ev.tradeId,
                 );
+                // An exit in an OCA group acts as a reduce-type member (TV: its 1-unit fill takes 1 off a
+                // reduce-type strategy.order of 2 in the group).
+                if (order.oca_name && order.oca_type === 'reduce') applyOca(strategy, order, qtyThis);
                 capRemaining -= qtyThis;
                 lastFill = fillPrice;
                 closedAny = true;

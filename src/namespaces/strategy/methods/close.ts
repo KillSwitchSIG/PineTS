@@ -4,7 +4,7 @@
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
-import { argValue, isNaArg } from '../utils';
+import { argValue, isNaArg, floorQty } from '../utils';
 
 /**
  * Close all trades opened by entries with the given id at market.
@@ -42,7 +42,9 @@ export function close(context: any) {
         // A quantity given as na is absent: the close takes the whole position.
         const qtyArg = argValue(parsed.qty);
         const qtyPercentArg = argValue(parsed.qty_percent);
-        const qty = isNaArg(qtyArg) ? undefined : qtyArg;
+        // A quantity is floored to the symbol's step; 0 closes everything (TV, AAPL long of 4:
+        // qty = 1.7 closes 1, qty = 0.4 closes 4).
+        const qty = isNaArg(qtyArg) || qtyArg === undefined || qtyArg === null ? undefined : floorQty(context, Math.abs(Number(qtyArg)));
         const qtyPercent = isNaArg(qtyPercentArg) ? undefined : qtyPercentArg;
         if (targetId === undefined || targetId === null) return;
 
@@ -109,7 +111,7 @@ export function close(context: any) {
         };
         // Resolve qty: if a fixed qty was passed it locks in here; otherwise
         // the engine computes from the matching position at fill time.
-        if (qty !== undefined) order.qty = Math.abs(Number(qty));
+        if (qty !== undefined) order.qty = qty;
 
         context.strategy.pending_orders.push(order);
     };
