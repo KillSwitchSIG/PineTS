@@ -1,5 +1,11 @@
 # Change Log
 
+## [0.11.1-atlas.2] - 2026-10-17 - Fork fixes (KillSwitchSIG/PineTS, branch atlas-fixes)
+
+### Fixed
+
+- **Drawing setters ignored named arguments**: `line.set_extend(id=l, extend=extend.none)`, `line.set_x2(id=l, x=…)`, `box.set_right(id=b, right=…)`, `label.set_text(id=lb, text=…)` and the other line / box / label / linefill / polyline / table setters, getters, `copy` and `delete` received the named-arguments object as `id` and did nothing. Named arguments now bind by their Pine parameter names, in function and method syntax. Test: `tests/namespaces/drawings-named-args.test.ts`.
+
 ## [0.11.1-atlas.1] - 2026-10-13 - Fork fixes (KillSwitchSIG/PineTS, branch atlas-fixes)
 
 Bug fixes found while embedding PineTS in a charting app, rebased onto 0.11.1. One commit each, with a regression test. The earlier fork fixes for provider errors, months in timeframes and the `request.*` na stubs are upstream now (#359, #365, #364).
