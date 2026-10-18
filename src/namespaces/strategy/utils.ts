@@ -208,12 +208,15 @@ export function limitFillSlack(context: any): number {
 }
 
 /**
- * The smallest tradable quantity: `syminfo.mincontract` (0.00001 for BINANCE:BTCUSDT), or
- * 0.000001 when the provider does not report one.
+ * The smallest tradable quantity: `syminfo.mincontract` (0.00001 for BINANCE:BTCUSDT). When the
+ * provider does not report one: a whole share for `syminfo.type` stock / fund (TradingView's broker
+ * emulator trades whole shares there), else 0.000001.
  */
 export function qtyStep(context: any): number {
-    const mincontract = context.pine?.syminfo?.mincontract;
-    return typeof mincontract === 'number' && mincontract > 0 ? mincontract : 1e-6;
+    const syminfo = context.pine?.syminfo;
+    const mincontract = syminfo?.mincontract;
+    if (typeof mincontract === 'number' && mincontract > 0) return mincontract;
+    return syminfo?.type === 'stock' || syminfo?.type === 'fund' ? 1 : 1e-6;
 }
 
 /**

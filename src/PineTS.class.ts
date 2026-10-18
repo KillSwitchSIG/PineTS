@@ -16,6 +16,29 @@ function getTimeframeDurationMs(timeframe: string | undefined): number {
 }
 
 /**
+ * syminfo for a series without provider symbol info (an array data source, or
+ * a provider whose getSymbolInfo failed): identified by the ticker PineTS was
+ * given, UTC, a 0.01 tick (the defaults the runtime already assumed when
+ * syminfo was missing); everything else empty / na.
+ */
+function defaultSymbolInfo(tickerId: string | undefined): ISymbolInfo {
+    const tickerid = String(tickerId ?? '');
+    const ticker = tickerid.includes(':') ? tickerid.slice(tickerid.indexOf(':') + 1) : tickerid;
+    const prefix = tickerid.includes(':') ? tickerid.slice(0, tickerid.indexOf(':')) : '';
+    return {
+        ticker, tickerid, prefix, root: ticker, main_tickerid: tickerid, current_contract: '', description: ticker, isin: '', type: '',
+        basecurrency: '', country: '', currency: '', timezone: 'UTC',
+        employees: NaN, industry: '', sector: '', shareholders: NaN, shares_outstanding_float: NaN, shares_outstanding_total: NaN,
+        expiration_date: NaN, session: '24x7', volumetype: '',
+        mincontract: NaN, minmove: 1, mintick: 0.01, pointvalue: 1, pricescale: 100,
+        recommendations_buy: NaN, recommendations_buy_strong: NaN, recommendations_date: NaN, recommendations_hold: NaN,
+        recommendations_sell: NaN, recommendations_sell_strong: NaN, recommendations_total: NaN,
+        target_price_average: NaN, target_price_date: NaN, target_price_estimates: NaN, target_price_high: NaN,
+        target_price_low: NaN, target_price_median: NaN,
+    };
+}
+
+/**
  * This class is a wrapper for the Pine Script language, it allows to run Pine Script code in a JavaScript environment
  */
 export class PineTS {
@@ -262,6 +285,9 @@ export class PineTS {
                 console.warn('Failed to get symbol info, using default values:', error);
             }
         }
+        // An array source has no symbol info (and a provider may fail to give
+        // one): scripts still read syminfo.*, so fall back to a default.
+        if (!this._syminfo) this._syminfo = defaultSymbolInfo(tickerId);
         this._ready = true;
         return true;
     }
@@ -449,6 +475,7 @@ export class PineTS {
         const context = this._initializeContext(null as any, inputs, this._isSecondaryContext);
         context.pineVersion = (transpiledFn as any)._pineVersion ?? null;
         this._transpiledCode = transpiledFn;
+        context.transpiledFn = transpiledFn;
         // Preserve slice attribution on the context so any nested LTF
         // request inside the slice can keep using the same map.
         const slices = (transpiledFn as any)._ltfSlices;
@@ -479,6 +506,7 @@ export class PineTS {
         const context = this._initializeContext(ind.source ?? null as any, prepared.inputs, this._isSecondaryContext);
         context.pineVersion = (prepared.fn as any)._pineVersion ?? null;
         this._transpiledCode = prepared.fn;
+        context.transpiledFn = prepared.fn;
         // Propagate transpile-time slices (one per request.security_lower_tf
         // call site) onto the Context so the slow path of the LTF runtime
         // can pick the right truncated body to run in the secondary
@@ -525,6 +553,7 @@ export class PineTS {
         const context = this._initializeContext(ind.source ?? null as any, prepared.inputs, this._isSecondaryContext);
         context.pineVersion = (prepared.fn as any)._pineVersion ?? null;
         this._transpiledCode = prepared.fn;
+        context.transpiledFn = prepared.fn;
         if (prepared.ltfSlices) (context as any)._ltfTruncatedBodies = prepared.ltfSlices;
 
         const startIdx = this.data.length - periods;
