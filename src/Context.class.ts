@@ -82,6 +82,11 @@ export class Context {
     /** Alert mode: 'realtime' = only fire on live bars (TV behavior), 'all' = fire on every bar (backtest). */
     public _alertMode: 'realtime' | 'all' = 'realtime';
 
+    /** The strategy broker trades on the tick grid (see PineTS.setFillsOnTickGrid). */
+    public _fillsOnTickGrid: boolean = false;
+    /** The current bar's raw prices while the broker works on its tick-grid copy. */
+    public _rawBar?: { open: number; high: number; low: number; close: number };
+
     /** Name-keyed map of declaration-prop overrides from `Indicator.prop`. Layered on top of
      *  the source's `indicator()`/`strategy()` call args inside the per-bar handlers
      *  (see Core.indicator and initializeStrategy). Empty object when no overrides are set. */

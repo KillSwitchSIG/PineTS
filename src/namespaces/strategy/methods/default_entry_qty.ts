@@ -15,6 +15,6 @@ export function default_entry_qty(context: any) {
         if (!context.strategy) return 0;
         // direction=1 (long) is arbitrary — calculateOrderQty's percent-of-equity
         // / cash branches don't depend on direction sign.
-        return calculateOrderQty(context, undefined, 1, fillPrice);
+        return calculateOrderQty(context, undefined, 1, fillPrice, false);
     };
 }

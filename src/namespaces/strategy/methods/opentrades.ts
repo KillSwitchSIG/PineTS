@@ -2,6 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
+import { openTradeList } from '../utils';
 
 /**
  * Pine's `strategy.opentrades` mirrors strategy.closedtrades' dual-role
@@ -15,8 +16,7 @@ export function opentrades(context: any) {
     return () => {
         // SNAPSHOT the open-trades list AT CALL TIME (see closedtrades.ts for
         // the rationale — per-bar plot values must capture per-bar state).
-        const live: Trade[] = context.strategy?.opentrades ?? [];
-        const list: Trade[] = live.slice();
+        const list: Trade[] = openTradeList(context);
         const at = (i: any): Trade | undefined => list[Number(i)];
         const currentPrice = (): number => {
             const md = context.marketData;
@@ -104,27 +104,20 @@ export function opentrades(context: any) {
             return basis > 0 ? (100 * t.max_runup) / basis : 0;
         };
 
-        // capital_held: total capital tied up by all open trades, respecting
-        // margin%. Pine exposes this as a PROPERTY (not method).
-        //
-        // TV-observed semantic: returns `na` when no margin is configured
-        // (both margin_long and margin_short default to 100). In that case
-        // the broker isn't "holding" any capital aside from the position
-        // itself — there's no margin reserve to report. Only when margin is
-        // explicitly set do we sum notional × margin%.
+        // capital_held (a PROPERTY in Pine): the full notional of the open trades, Σ |size| × entry
+        // price × point value, whatever the margin percentage; 0 when flat. `na` without a margin
+        // model (margin 0, the v5 default). TradingView: 39,999.56 = 0.64828 × 61,701.06 at 20%
+        // margin, 61,701.06 for 1 contract at the v6 default of 100%.
         const s = context.strategy;
         const marginLong  = s?.config?.margin_long  ?? 100;
         const marginShort = s?.config?.margin_short ?? 100;
-        const marginConfigured = marginLong !== 100 || marginShort !== 100;
-        if (!s || s.opentrades.length === 0 || !marginConfigured) {
+        const dir = Math.sign(s?.position_size ?? 0);
+        const noMargin = !s || (dir > 0 ? !(marginLong > 0) : dir < 0 ? !(marginShort > 0) : !(marginLong > 0) && !(marginShort > 0));
+        if (noMargin) {
             result.capital_held = NaN;
         } else {
             let totalHeld = 0;
-            for (const t of s.opentrades) {
-                const notional = Math.abs(t.size) * t.entry_price;
-                const marginPct = t.size > 0 ? marginLong : marginShort;
-                totalHeld += notional * (marginPct / 100);
-            }
+            for (const t of list) totalHeld += Math.abs(t.size) * t.entry_price * pointValue;
             result.capital_held = totalHeld;
         }
 

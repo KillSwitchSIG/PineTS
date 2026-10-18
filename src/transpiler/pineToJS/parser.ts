@@ -751,6 +751,16 @@ export class Parser {
             if (this.match(TokenType.KEYWORD, 'varip')) {
                 this.advance();
             }
+            // `name = value` without a type annotation: TradingView infers the field type from the default.
+            if (this.isNameSlot(this.peek()) && this.peek(1).type === TokenType.OPERATOR && this.peek(1).value === '=') {
+                const fieldName = this.expectName().value;
+                this.advance();
+                this.skipNewlines();
+                const defaultValue = this.parseExpression();
+                fields.push({ type: this.inferFieldType(defaultValue), name: fieldName, defaultValue });
+                this.skipNewlines();
+                continue;
+            }
             const fieldType = this.parseTypeExpression(); // Now handles generics
             // Field names may be contextual keywords (`int type = 0`) — the lexer
             // already delivers them as identifiers here; reserved words are rejected.
@@ -772,6 +782,18 @@ export class Parser {
         }
 
         return new TypeDefinition(name, fields);
+    }
+
+    /** Type of an untyped UDT field, from its default value. */
+    inferFieldType(expr: any): string {
+        if (expr?.type === 'UnaryExpression' && (expr.operator === '-' || expr.operator === '+')) return this.inferFieldType(expr.argument);
+        if (expr?.type === 'Literal') {
+            if (typeof expr.value === 'boolean') return 'bool';
+            if (typeof expr.value === 'string') return 'string';
+            if (typeof expr.value === 'number') return typeof expr.raw === 'string' && /^\d+$/.test(expr.raw) ? 'int' : 'float';
+        }
+        if (expr?.type === 'MemberExpression' && expr.object?.type === 'Identifier' && expr.object.name === 'color') return 'color';
+        return 'float';
     }
 
     // Parse var/varip declaration

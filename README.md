@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Pine Script® runtime for JavaScript</strong><br>
-  Run TradingView® indicators in Node.js, browsers, and any JS environment.
+  Run Pine Script® anywhere: PineTS is LuxAlgo's open-source Pine Script® runtime, so indicators written for TradingView® run in Node.js, browsers, and any JS environment.
 </p>
 
 <p align="center">

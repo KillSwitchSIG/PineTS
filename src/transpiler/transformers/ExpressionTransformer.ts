@@ -556,7 +556,15 @@ export function transformMemberExpression(memberNode: any, originalParamName: st
             _transformed: true,
             _isParamCall: true,
         };
-        const getCall: any = ASTFactory.createGetCall(paramCall, memberNode.property);
+        // The series is recorded ahead of the statement: inline, a lazy `and` / `or` / `?:` operand would
+        // skip it on the bars where the operand is not evaluated, and `[n]` would then read a stale bar.
+        let series: any = paramCall;
+        if (scopeManager.addEagerHoistedStatement(ASTFactory.createVariableDeclaration(paramId, paramCall))) {
+            series = ASTFactory.createIdentifier(paramId);
+            series._skipTransformation = true;
+            series._arrayAccessed = true;
+        }
+        const getCall: any = ASTFactory.createGetCall(series, memberNode.property);
         getCall._transformed = true;
         getCall._historyTransformed = true;
         Object.assign(memberNode, getCall);
@@ -1835,8 +1843,8 @@ function transformCallExpressionInner(node: any, scopeManager: ScopeManager, nam
         }
 
         // Inject unique call ID for TA functions to enable proper state management
-        // (`math.random` keeps a seeded generator per call site the same way)
-        if (namespace === 'ta' || fullPath === 'math.random') {
+        // (`math.random` keeps a seeded generator per call site the same way, `math.sum` its window)
+        if (namespace === 'ta' || fullPath === 'math.random' || fullPath === 'math.sum') {
             // Any function scope on the stack, not just the immediate one: a call in an
             // `if` / `for` / `else if` inside a function body must still be keyed by the call path.
             if (scopeManager.isInsideFunctionScope()) {

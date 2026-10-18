@@ -2,6 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
+import { tradeCostBasis } from '../utils';
 
 /**
  * Pine's `strategy.closedtrades` serves a dual role:
@@ -36,21 +37,11 @@ export function closedtrades(context: any) {
             [Symbol.toPrimitive]() { return list.length; },
         };
 
-        // Cost-basis denominator: entry notional + entry commission.
-        // Notional = |size| × entry_price × pointValue (PV converts price-units
-        // to account currency for futures; 1 for crypto/forex).
-        // For closed trades, trade.commission already contains BOTH entry
-        // and exit legs, so we approximate the entry leg as half. (For the
-        // percent='percent' commission type both legs are roughly equal at
-        // entry vs exit price — close enough; matches TV within epsilon.)
         const pointValue: number = context.pine?.syminfo?.pointvalue ?? 1;
-        const costBasis = (t: Trade): number => {
-            const notional = Math.abs(t.size) * t.entry_price * pointValue;
-            const entryCommApprox = (t.commission ?? 0) / 2;
-            return notional + entryCommApprox;
-        };
+        const costBasis = (t: Trade): number => tradeCostBasis(t, pointValue);
 
-        result.profit = (i: any) => at(i)?.profit ?? NaN;
+        // Out of range: 0, as on TradingView (like max_runup / max_drawdown below).
+        result.profit = (i: any) => at(i)?.profit ?? 0;
         result.profit_percent = (i: any) => {
             const t = at(i);
             if (!t || t.profit === undefined) return NaN;

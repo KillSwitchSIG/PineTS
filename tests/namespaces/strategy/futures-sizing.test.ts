@@ -67,16 +67,18 @@ describe('contract-aware strategy sizing', () => {
         c.strategy.equity = 80000;
         expect(calculateOrderQty(c, undefined, 1, 10000)).toBe(2);
     });
-    it.each([entry, order])('sizes at order price before slippage changes the fill', (place) => {
+    // TradingView sizes a stop order at the price slippage gives it: floor($1000 / ((125 + 4 × 0.25) × $2)) = 3.
+    it.each([entry, order])('sizes a stop order at its slipped price', (place) => {
         const c = contextFor({ default_qty_type: 'cash', default_qty_value: 1000, slippage: 4, margin_long: 0 });
         for (const field of ['open', 'high', 'low', 'close']) c.data[field] = new Series([100]);
         place(c)('Long', 1, { stop: 125 });
-        expect(c.strategy.pending_orders[0].qty).toBe(4);
+        expect(c.strategy.pending_orders[0].qty).toBe(3);
         c.idx = 1;
-        for (const field of ['open', 'high', 'low', 'close']) c.data[field] = new Series([130]);
+        // opens below the stop and trades through it (a bar opening beyond the stop fills at its open)
+        for (const [field, v] of [['open', 124], ['high', 130], ['low', 124], ['close', 130]] as const) c.data[field] = new Series([v]);
         processStrategyOrders(c);
         expect(c.strategy.opentrades[0].entry_price).toBe(126);
-        expect(c.strategy.position_size).toBe(4);
+        expect(c.strategy.position_size).toBe(3);
     });
     it('exposes contract-aware sizing through default_entry_qty', () => {
         const c = contextFor({ default_qty_type: 'cash', default_qty_value: 1000 });
