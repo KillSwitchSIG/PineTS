@@ -698,16 +698,18 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                 // Limit orders fill when price reaches the limit level (past it by
                 // backtest_fill_limits_assumption ticks), at the open when the bar opens
                 // beyond it (a better price, as on TradingView: limit 7,119.35, open 7,102.50 → 7,102.50).
+                // An open past the limit by fewer than those ticks fills at the limit (TV, AAPL 1D,
+                // N = 200: limit 51.95, open 50.10, low 49.165 → 51.95).
                 if (order.limit !== undefined) {
                     const direction = parseDirection(order.direction);
                     if (direction === 1 && lowPrice <= order.limit - limitSlack) {
                         // Long limit order - buy when price drops to limit
                         shouldFill = true;
-                        fillPrice = Math.min(openPrice, order.limit);
+                        fillPrice = openPrice <= order.limit - limitSlack ? openPrice : order.limit;
                     } else if (direction === -1 && highPrice >= order.limit + limitSlack) {
                         // Short limit order - sell when price rises to limit
                         shouldFill = true;
-                        fillPrice = Math.max(openPrice, order.limit);
+                        fillPrice = openPrice >= order.limit + limitSlack ? openPrice : order.limit;
                     }
                 }
                 break;
