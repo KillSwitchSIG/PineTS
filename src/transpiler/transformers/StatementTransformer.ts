@@ -714,7 +714,7 @@ export function transformVariableDeclaration(varNode: any, scopeManager: ScopeMa
             if (isArrowFunction || isArrayPatternVar) {
                 rightSide = decl.init;
             } else if (kind === 'var') {
-                rightSide = ASTFactory.createInitVarCall(targetVarRef, decl.init);
+                rightSide = ASTFactory.createInitVarCall(targetVarRef, decl.init, decl._varip === true);
             } else if (decl._tupleArity !== undefined) {
                 const toTuple = ASTFactory.createCallExpression(
                     ASTFactory.createMemberExpression(ASTFactory.createContextIdentifier(), ASTFactory.createIdentifier('toTuple')),

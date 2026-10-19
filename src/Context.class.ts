@@ -730,9 +730,10 @@ export class Context {
      * - Subsequent bars: maintains the previous value (state).
      * @param trg - The target variable
      * @param src - The source initializer value
+     * @param varip - true for a `varip` declaration (exempt from the per-bar rollback)
      * @returns Series object
      */
-    initVar(trg, src: any): Series {
+    initVar(trg, src: any, varip: boolean = false): Series {
         // If target exists (subsequent bars), return it as is.
         // PineTS automatically shifts context variables by copying the last value,
         // so the previous value is already carried over to the current slot.
@@ -773,7 +774,9 @@ export class Context {
             value = this.precision(src);
         }
 
-        return this.typedSeries([value], value);
+        const series = this.typedSeries([value], value);
+        if (varip) series.varip = true;
+        return series;
     }
 
     /**
