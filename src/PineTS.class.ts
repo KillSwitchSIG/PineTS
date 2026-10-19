@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processBarOrders, barPath, beginStrategyBar, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
+import { processBarOrders, barPath, beginStrategyBar, riskStartBar, riskAtBarClose, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1311,7 +1311,9 @@ export class PineTS {
             // A scheduled phantom close call takes its place.
             if (context.strategy) {
                 const rawBar = this._snapBarForBroker(context);
+                riskAtBarClose(context);
                 if (!(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
+                riskAtBarClose(context);
                 processOrdersOnClose(context);
                 if (rawBar) this._restoreRawBar(context, rawBar);
             }
