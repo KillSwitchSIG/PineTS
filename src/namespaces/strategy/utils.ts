@@ -1435,6 +1435,15 @@ function riskCloseOut(context: any, reason: string, price: number, scope: 'day' 
     const strategy: StrategyState = context.strategy;
     const st = riskState(context);
     const time = Series.from(context.data.openTime).get(0);
+    // strategy.close / close_all orders due at the open where the rule triggers still fill there first
+    // (TV, BTCUSDT 1h, max_intraday_filled_orders(4): close_all queued after a pyramiding add, both at
+    // one open → the three older lots "Close position order", only the add closed under the rule).
+    if (context._pathAt === 0 && !(st as any)._closingOut) {
+        (st as any)._closingOut = true;
+        processExitOrders(context, 'market');
+        (st as any)._closingOut = false;
+        setFillAt(context, 0);
+    }
     if (strategy.opentrades.length > 0 && strategy.position_size !== 0) {
         closePartialPosition(context, Math.abs(strategy.position_size), price, time, { exitId: reason, exitComment: reason });
     }
@@ -1515,7 +1524,7 @@ export function riskAfterFill(context: any, price: number): void {
     const rules = strategy?.risk_rules;
     if (!rules || Object.keys(rules).length === 0) return;
     const st = riskState(context);
-    if (st.haltedFrom !== undefined) return;
+    if (st.haltedFrom !== undefined || (st as any)._closingOut) return;
     st.dayFills++;
     const realized = strategy.initial_capital + strategy.netprofit;
     st.realizedPeak = Math.max(st.realizedPeak, realized);

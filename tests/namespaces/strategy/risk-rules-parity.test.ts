@@ -10,6 +10,10 @@
 //     before that fill's closed P&L is booked (BTCUSDT 1h, 1,500 cash: a short held from the previous
 //     day reversed at 61,357.63 for +1,260.68, equity 93,183.19 against 93,462.83 at the day start →
 //     "Close Position (Max intraday Loss)" at that open, as at 3 other such reversals; 27 halts of 27).
+//   - max_intraday_filled_orders(n): a strategy.close_all due at the open where the n-th fill of the
+//     day happens still fills before the close-out (BTCUSDT 1h, n = 4: close_all queued after a
+//     pyramiding add, both at one open: the three older lots "Close position order", only the add
+//     "Close Position (Max number of filled orders in one day)").
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Indicator } from '../../../src';
@@ -57,6 +61,31 @@ if bar_index == 1
             [flat(100), flat(100), [99, 99, 94, 94.5], flat(94.5)],
         );
         expect(s.closedtrades).toHaveLength(0);
+        expect(s.position_size).toBe(0);
+    });
+});
+
+describe('max_intraday_filled_orders', () => {
+    it('a close_all due at the open of the last allowed fill closes its trades before the close-out', async () => {
+        // day 2 from bar 4: S1 fills at bar 5 (1st), S2 at bar 6 (2nd); the add S3 and close_all
+        // placed on bar 6 fill at the bar 7 open (3rd fill)
+        const s = await run(
+            ', pyramiding = 5',
+            `strategy.risk.max_intraday_filled_orders(3)
+if bar_index == 4
+    strategy.entry("S1", strategy.short)
+if bar_index == 5
+    strategy.entry("S2", strategy.short)
+if bar_index == 6
+    strategy.entry("S3", strategy.short)
+    strategy.close_all()`,
+            Array.from({ length: 10 }, (_, i) => flat(100 + i)),
+        );
+        expect(rows(s)).toEqual([
+            ['S1', 5, 'Close position order', 107, 7],
+            ['S2', 6, 'Close position order', 107, 7],
+            ['S3', 7, 'Close Position (Max number of filled orders in one day)', 107, 7],
+        ]);
         expect(s.position_size).toBe(0);
     });
 });
