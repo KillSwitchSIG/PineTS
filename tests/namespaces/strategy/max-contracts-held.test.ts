@@ -55,6 +55,37 @@ if bar_index == 1
         expect(held(s)).toEqual([1, 0, 1]);
     });
 
+    it('close_all + opposite entry at one open (BINANCE:BTCUSDT 1h: long 1, short 1)', async () => {
+        const s = await run(
+            `if bar_index == 0
+    strategy.entry("L", strategy.long)
+if bar_index == 2
+    strategy.close_all(comment = "ALL")
+    strategy.entry("S", strategy.short)`,
+            [flat(), flat(101), flat(102), flat(103), flat(104)],
+        );
+        expect(s.position_size).toBe(-1);
+        expect(held(s)).toEqual([1, 1, 1]);
+    });
+
+    it('fills inside the bar are not taken as fills at the open (BINANCE:BTCUSDT 1h: 1, 1, 1)', async () => {
+        // long from a stop-limit at the bar 1 open; on bar 2 its stop exit at 99.60, a short stop-limit
+        // at 99 and that short's stop at 99.40 on the way back up
+        const s = await run(
+            `if bar_index == 0
+    strategy.entry("SLL", strategy.long, stop = 100, limit = 101)
+    strategy.entry("SLS", strategy.short, stop = 99, limit = 98.5)
+strategy.exit("x1", "SLL", stop = 99.6)
+strategy.exit("x2", "SLS", stop = 99.4)`,
+            [[99.9, 99.95, 99.85, 99.9], [100, 100.3, 99.7, 100], [100, 100.2, 98.8, 99.8], flat(99.8)],
+        );
+        expect(s.closedtrades.map((t: any) => [t.entry_id, t.entry_price, t.exit_id, t.exit_price])).toEqual([
+            ['SLL', 100, 'x1', 99.6],
+            ['SLS', 99, 'x2', 99.4],
+        ]);
+        expect(held(s)).toEqual([1, 1, 1]);
+    });
+
     it('a reversal at the open counts the new side only', async () => {
         const s = await run(
             `if bar_index == 0

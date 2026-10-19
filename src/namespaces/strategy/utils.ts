@@ -1290,11 +1290,17 @@ function applySlippage(context: any, direction: number, nominalPrice: number): n
  * Update max_contracts_held_* peaks after a position-size change.
  * Called whenever position_size mutates (openTrade / closePartialPosition).
  * Order fills at the bar's open are collected instead (see flushOpenFills): `delta` is the fill's
- * signed change of the position, `orderFill` false for margin calls and risk close-outs.
+ * signed change of the position, `price` its price, `orderFill` false for margin calls and risk
+ * close-outs.
  */
-function updateMaxContractsHeld(strategy: StrategyState, context?: any, delta = 0, orderFill = true): void {
+function updateMaxContractsHeld(strategy: StrategyState, context?: any, delta = 0, price = NaN, orderFill = true): void {
     const batch = (strategy as any)._openFills;
-    if (batch && orderFill && context && batch.idx === context.idx && context._pathAt === 0) {
+    const atOpen = () => {
+        const open = Series.from(context.data.open).get(0);
+        const slip = (strategy.config.slippage ?? 0) * (context.pine?.syminfo?.mintick ?? 0.01);
+        return Math.abs(price - open) <= slip + 1e-9 * Math.abs(open);
+    };
+    if (batch && orderFill && context && batch.idx === context.idx && context._pathAt === 0 && atOpen()) {
         if (delta > 0) batch.buys += delta;
         else batch.sells += delta;
         batch.real.push(strategy.position_size);
@@ -1445,7 +1451,7 @@ function riskCloseOut(context: any, reason: string, price: number, scope: 'day' 
         setFillAt(context, 0);
     }
     if (strategy.opentrades.length > 0 && strategy.position_size !== 0) {
-        closePartialPosition(context, Math.abs(strategy.position_size), price, time, { exitId: reason, exitComment: reason });
+        closePartialPosition(context, Math.abs(strategy.position_size), price, time, { exitId: reason, exitComment: reason, forced: true });
     }
     for (const o of strategy.pending_orders) if (o.status === 'pending') o.status = 'cancelled';
     if (scope === 'day') {
@@ -1728,7 +1734,7 @@ export function openTrade(
         strategy.position_size = newSize;
     }
 
-    updateMaxContractsHeld(strategy, context, trade.size);
+    updateMaxContractsHeld(strategy, context, trade.size, price);
 }
 
 /**
@@ -1815,6 +1821,8 @@ export interface CloseInfo {
     isImplicitReversal?: boolean;
     /** The closing leg's part of the reversal order's quantity (its share of a cash_per_order fee). */
     reversalShare?: number;
+    /** A margin call or a risk-rule close-out, not an order fill. */
+    forced?: boolean;
 }
 
 type LedgerSlice = {
@@ -2039,10 +2047,9 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     if (Math.abs(newSize) < 1e-9) newSize = 0;
 
     strategy.position_size = newSize;
-    const forced = closeInfo?.exitId === MARGIN_CALL_EXIT_ID || (closeInfo?.exitId !== RISK_REASON.consDays && Object.values(RISK_REASON).includes(closeInfo?.exitId as any));
-    updateMaxContractsHeld(strategy, context, newSize - currentSize, !forced);
+    updateMaxContractsHeld(strategy, context, newSize - currentSize, exitPrice, !closeInfo?.forced);
     // The P&L an order fill books, for the risk check after it (see riskAfterFill).
-    if (!forced) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
+    if (!closeInfo?.forced) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
 
     if (newSize === 0) {
         strategy.position_avg_price = NaN;
@@ -3030,6 +3037,7 @@ export function applyPendingCloseMarginCall(context: any): void {
     closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), applySlippage(context, -pending.dir, pending.price), pending.time, {
         exitId: MARGIN_CALL_EXIT_ID,
         exitComment: 'Margin call',
+        forced: true,
     });
 
     if (Math.abs(strategy.position_size) > 1e-9) {
@@ -3176,6 +3184,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         closePartialPosition(context, qtyToLiquidate, applySlippage(context, -positionDir, adversePrice), currentTime, {
             exitId: MARGIN_CALL_EXIT_ID,
             exitComment: 'Margin call',
+            forced: true,
         });
         riskAfterMarginCall(context, adversePrice);
 
