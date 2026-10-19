@@ -1018,13 +1018,25 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
             // stop reversal needing 10,044.06 at 64,257.33, equity 10,044.53 at the open but 10,035.06
             // at the fill: the long closes, no short opens).
             const intrabar = (context._pathAt ?? 0) > 0 && (context._pathAt ?? 0) < 3;
+            // A market order filling at the open is checked against the account where it was placed
+            // (the previous close), its margin at the fill price (TV, AAPL 1D, 100 % of equity: equity
+            // 11,869.15 at the signal's close, 255 × 46.60 = 11,883.00 at the next open → no fill,
+            // although the equity at that open was 11,912.50).
+            const placement = (strategy as any)._placement;
+            const atPlacement = order.type === 'market' && context._pathAt === 0 && placement?.idx === context.idx ? placement : undefined;
             let heldMarginRemaining = 0;
             if (oldSign === direction) {
-                heldMarginRemaining = computeHeldMargin(context, intrabar ? fillPrice : markPrice);
+                heldMarginRemaining = computeHeldMargin(context, intrabar ? fillPrice : atPlacement ? atPlacement.price : markPrice);
             }
-            const equityNow = intrabar && oldSize !== 0 ? computeEquityAtPrice(context, fillPrice) : strategy.equity;
+            const equityNow = atPlacement ? atPlacement.equity : intrabar && oldSize !== 0 ? computeEquityAtPrice(context, fillPrice) : strategy.equity;
             const availableEquity = equityNow - heldMarginRemaining;
-            const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
+            // A stop / limit entry sized to reverse a position that another exit closed before it
+            // filled is checked for its own quantity only; it fills whole and the margin call trims it
+            // (TV, ES1! 1D: 2 + 2 contracts at 4,363.25 for equity 865,776 after the long's stop exit,
+            // then a margin call of 1 contract).
+            const orphanedReversal = oldSize === 0 && order._isReversalEntry && !(order as any)._reversesPending && order.type !== 'market' && (order as any)._base_qty !== undefined;
+            const checkedQty = orphanedReversal ? Math.min((order as any)._base_qty, newOpenQty) : newOpenQty;
+            const requiredMargin = computeRequiredMargin(checkedQty, fillPrice, marginPct, pointValue);
             // An entry sized to reverse the position the orders queued before it would open (its own
             // quantity b plus their s), filling while flat and too large for the account. Fitted on
             // TradingView probes (BTC at 83,952, quantities 1–3, capital 60,000–400,000), not
@@ -1047,8 +1059,12 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 // QA margin_calls xlsx: after a partial margin-call
                 // liquidation, the remainder was closed by the next
                 // reversal order whose open leg was margin-rejected.
+                // A market reversal whose open leg fitted the account at its placement price is
+                // dropped whole instead: the position stays open (TV, AAPL 1D above: the long is held
+                // to a later signal; a fixed 1 BTC reversal not fitting at placement closes the short).
                 const qtyToClose = Math.min(Math.abs(oldSize), order.qty);
-                if (reversesHeld && qtyToClose > 0) {
+                const fittedAtPlacement = atPlacement && computeRequiredMargin(newOpenQty, atPlacement.price, marginPct, pointValue) <= availableEquity;
+                if (reversesHeld && qtyToClose > 0 && !fittedAtPlacement) {
                     closePartialPosition(context, qtyToClose, fillPrice, currentTime, {
                         exitId: order.id,
                         exitComment: order.comment,
@@ -3161,6 +3177,13 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
  */
 export function processBarOrders(context: any): void {
     if (context.strategy) (context.strategy as any)._openFills = { idx: context.idx, start: context.strategy.position_size, buys: 0, sells: 0, real: [] };
+    // The account where the market orders filling at this open were placed: the previous close (a
+    // calc_on_order_fills segment after the first: its starting point), for their margin check.
+    if (context.strategy) {
+        const seg = context._excSeg;
+        const at = seg && seg.scale > 0 ? Series.from(context.data.open).get(0) : Series.from(context.data.close).get(1);
+        if (Number.isFinite(at)) (context.strategy as any)._placement = { idx: context.idx, price: at, equity: computeEquityAtPrice(context, at) };
+    }
     // strategy.close / close_all market orders fill at the open ahead of entries (see
     // processExitOrders' 'market' phase).
     processExitOrders(context, 'market');
