@@ -16,7 +16,7 @@ export function avg_losing_trade_percent(context: any) {
         for (const t of s.closedtrades) {
             if ((t.profit ?? 0) < 0) {
                 const basis = tradeCostBasis(t, pointValue);
-                if (basis > 0) sum += (100 * (t.profit ?? 0)) / basis;
+                if (basis !== 0) sum += (100 * (t.profit ?? 0)) / basis;
             }
         }
         return sum / s.losstrades;

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 LuxAlgo
 
 import { Trade } from '../types';
-import { openTradeList } from '../utils';
+import { brokerPrice, openTradeList } from '../utils';
 
 /**
  * Pine's `strategy.opentrades` mirrors strategy.closedtrades' dual-role
@@ -17,11 +17,17 @@ export function opentrades(context: any) {
         // SNAPSHOT the open-trades list AT CALL TIME (see closedtrades.ts for
         // the rationale — per-bar plot values must capture per-bar state).
         const list: Trade[] = openTradeList(context);
-        const at = (i: any): Trade | undefined => list[Number(i)];
+        // `na` reads trade 0, as on TradingView.
+        const at = (i: any): Trade | undefined => {
+            const n = Number(i);
+            return list[Number.isNaN(n) ? 0 : n];
+        };
+        // The close as the broker trades it (on the tick grid), as strategy.openprofit: TradingView,
+        // AAPL 1D, close 126.655 → (120.5 − 126.66) × 2,200 = −13,552 for a short.
         const currentPrice = (): number => {
             const md = context.marketData;
             if (Array.isArray(md) && context.idx >= 0 && context.idx < md.length) {
-                return md[context.idx]?.close ?? NaN;
+                return brokerPrice(context, md[context.idx]?.close ?? NaN);
             }
             return NaN;
         };
@@ -65,25 +71,28 @@ export function opentrades(context: any) {
         const costBasis = (t: Trade): number =>
             Math.abs(t.size) * t.entry_price * pointValue + (t.commission ?? 0);
 
+        // Out of range: 0 for the numeric getters, na for prices, bar indexes and times (TradingView).
         result.profit = (i: any) => {
             const t = at(i);
-            if (!t) return NaN;
+            if (!t) return 0;
             const cp = currentPrice();
             if (!Number.isFinite(cp)) return NaN;
             const dir = Math.sign(t.size);
             const priceChange = dir === 1 ? cp - t.entry_price : t.entry_price - cp;
             return priceChange * Math.abs(t.size) * pointValue - (t.commission ?? 0) - hypotheticalExitComm(t, cp);
         };
+        // A negative basis (negative prices) is divided by too: TradingView, CL1! 1D, short 2 @ −34.99
+        // with 6 entry commission, profit 1,228 → 1,228 / −69,974 = −1.7549 %.
         result.profit_percent = (i: any) => {
             const t = at(i);
-            if (!t) return NaN;
+            if (!t) return 0;
             const p = result.profit(i);
             if (!Number.isFinite(p)) return NaN;
             const basis = costBasis(t);
-            return basis > 0 ? (100 * p) / basis : NaN;
+            return basis !== 0 ? (100 * p) / basis : NaN;
         };
-        result.size = (i: any) => at(i)?.size ?? NaN;
-        result.commission = (i: any) => at(i)?.commission ?? NaN;
+        result.size = (i: any) => at(i)?.size ?? 0;
+        result.commission = (i: any) => at(i)?.commission ?? 0;
         result.entry_price = (i: any) => at(i)?.entry_price ?? NaN;
         result.entry_bar_index = (i: any) => at(i)?.entry_bar_index ?? NaN;
         result.entry_id = (i: any) => at(i)?.entry_id ?? '';
