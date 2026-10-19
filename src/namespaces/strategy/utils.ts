@@ -1265,15 +1265,47 @@ function applySlippage(context: any, direction: number, nominalPrice: number): n
 /**
  * Update max_contracts_held_* peaks after a position-size change.
  * Called whenever position_size mutates (openTrade / closePartialPosition).
+ * Order fills at the bar's open are collected instead (see flushOpenFills): `delta` is the fill's
+ * signed change of the position, `orderFill` false for margin calls and risk close-outs.
  */
-function updateMaxContractsHeld(strategy: StrategyState): void {
-    const abs = Math.abs(strategy.position_size);
-    if (abs > strategy.max_contracts_held_all) strategy.max_contracts_held_all = abs;
-    if (strategy.position_size > strategy.max_contracts_held_long) {
-        strategy.max_contracts_held_long = strategy.position_size;
+function updateMaxContractsHeld(strategy: StrategyState, context?: any, delta = 0, orderFill = true): void {
+    const batch = (strategy as any)._openFills;
+    if (batch && orderFill && context && batch.idx === context.idx && context._pathAt === 0) {
+        if (delta > 0) batch.buys += delta;
+        else batch.sells += delta;
+        batch.real.push(strategy.position_size);
+        return;
     }
-    if (-strategy.position_size > strategy.max_contracts_held_short) {
-        strategy.max_contracts_held_short = -strategy.position_size;
+    latchContractsHeld(strategy, strategy.position_size);
+}
+
+function latchContractsHeld(strategy: StrategyState, size: number): void {
+    const abs = Math.abs(size);
+    if (abs > strategy.max_contracts_held_all) strategy.max_contracts_held_all = abs;
+    if (size > strategy.max_contracts_held_long) strategy.max_contracts_held_long = size;
+    if (-size > strategy.max_contracts_held_short) strategy.max_contracts_held_short = -size;
+}
+
+/**
+ * max_contracts_held_* over the order fills at the bar's open, in TradingView's order there: the
+ * buys, then the sells (TV, BINANCE:BTCUSDT 1h: strategy.close("L") + strategy.entry("L") on one bar
+ * → long 2 for a position of 1; a short add and a breached strategy.exit stop at one open → short 1,
+ * the stop closing the old short). The fills themselves are booked in PineTS's own order; when the
+ * buys-first position would be on a side neither the start nor the end of the open is on, the
+ * positions PineTS went through are used.
+ */
+function flushOpenFills(strategy: StrategyState): void {
+    const batch = (strategy as any)._openFills;
+    (strategy as any)._openFills = undefined;
+    if (!batch || batch.real.length === 0) return;
+    const afterBuys = batch.start + batch.buys;
+    const end = batch.start + batch.buys + batch.sells;
+    const side = Math.sign(Math.abs(afterBuys) < 1e-9 ? 0 : afterBuys);
+    if (side === 0 || side === Math.sign(batch.start) || side === Math.sign(Math.abs(end) < 1e-9 ? 0 : end)) {
+        latchContractsHeld(strategy, afterBuys);
+        latchContractsHeld(strategy, Math.abs(end) < 1e-9 ? 0 : end);
+    } else {
+        for (const size of batch.real) latchContractsHeld(strategy, size);
     }
 }
 
@@ -1615,7 +1647,7 @@ export function openTrade(
         strategy.position_size = newSize;
     }
 
-    updateMaxContractsHeld(strategy);
+    updateMaxContractsHeld(strategy, context, trade.size);
 }
 
 /**
@@ -1925,7 +1957,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     if (Math.abs(newSize) < 1e-9) newSize = 0;
 
     strategy.position_size = newSize;
-    updateMaxContractsHeld(strategy);
+    const forced = closeInfo?.exitId === MARGIN_CALL_EXIT_ID || (closeInfo?.exitId !== RISK_REASON.consDays && Object.values(RISK_REASON).includes(closeInfo?.exitId as any));
+    updateMaxContractsHeld(strategy, context, newSize - currentSize, !forced);
 
     if (newSize === 0) {
         strategy.position_avg_price = NaN;
@@ -3127,6 +3160,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
  * at the open, then the margin checkpoints and the intrabar exits along the bar's path.
  */
 export function processBarOrders(context: any): void {
+    if (context.strategy) (context.strategy as any)._openFills = { idx: context.idx, start: context.strategy.position_size, buys: 0, sells: 0, real: [] };
     // strategy.close / close_all market orders fill at the open ahead of entries (see
     // processExitOrders' 'market' phase).
     processExitOrders(context, 'market');
@@ -3152,6 +3186,7 @@ export function processBarOrders(context: any): void {
         riskEndOfBarFills(context);
         processMarginCall(context, 'extreme');
     }
+    if (context.strategy) flushOpenFills(context.strategy);
 }
 
 /**
