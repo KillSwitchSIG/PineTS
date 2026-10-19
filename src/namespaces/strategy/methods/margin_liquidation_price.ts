@@ -34,11 +34,13 @@ export function margin_liquidation_price(context: any) {
         const marginPct = direction === 1
             ? (s.config.margin_long  ?? 100)
             : (s.config.margin_short ?? 100);
-        // No margin model (margin 0, the v5 default): na. At 100% a long has no liquidation
-        // price, while a short still has one: TradingView reports (equity / qty + entry) / 2 for
-        // 1 contract short at 62,867.99 with 101,166.93 realized equity → 82,017.46.
+        // No margin model (margin 0, the v5 default): na. At exactly 100% a long has no liquidation
+        // price (the denominator is 0), while a short still has one: TradingView reports
+        // (equity / qty + entry) / 2 for 1 contract short at 62,867.99 with 101,166.93 realized
+        // equity → 82,017.46. Above 100% a long has one again: 131,526.56 =
+        // (10,000 / 0.07604 − 65,746.45) / 0.5 at margin_long = 150.
         if (!(marginPct > 0)) return NaN;
-        if (direction === 1 && marginPct >= 100) return NaN;
+        if (direction === 1 && marginPct === 100) return NaN;
 
         const qty        = Math.abs(s.position_size);
         const pointValue = context.pine?.syminfo?.pointvalue ?? 1;

@@ -11,7 +11,9 @@
 //     prices are negative (NYMEX:CL1! back-adjusted 1D, April–May 2020);
 //   - only the last 9,000 closed trades stay listed: closedtrades.first_index = closedtrades − 9,000,
 //     a trade below it reads as out of range, the counts are not truncated (BINANCE:BTCUSDT 1h, 19,990
-//     closed trades).
+//     closed trades);
+//   - margin_liquidation_price for a long with margin_long above 100;
+//   - default_entry_qty keeps the sign of a negative fill price, truncated toward zero.
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Indicator } from '../../../src';
@@ -261,4 +263,54 @@ plot(strategy.wintrades + strategy.losstrades + strategy.eventrades, "counted")`
         expect(v('ebi last')[1850]).toBe(1849);
         expect(v('counted')[1850]).toBe(9250);
     }, 120_000);
+});
+
+describe('margin_liquidation_price for a long with margin_long above 100', () => {
+    it('margin_long = 150 (BINANCE:BTCUSDT 1h)', async () => {
+        const v = await run(
+            'initial_capital = 10000, default_qty_type = strategy.fixed, default_qty_value = 0.07604, margin_long = 150, margin_short = 150',
+            `if bar_index == 0
+    strategy.entry("L", strategy.long)
+plot(strategy.margin_liquidation_price, "liq")`,
+            [
+                [65700, 65800, 65600, 65750],
+                [65746.45, 65900, 65700, 65800],
+                [65800, 65900, 65700, 65850],
+            ],
+            BTC,
+        );
+        // TradingView: 131,526.56 = (10,000 / 0.07604 − 65,746.45) / 0.5, rounded down to the tick.
+        expect(v('liq')[1]).toBeCloseTo(131526.56, 6);
+        expect(v('liq')[2]).toBeCloseTo(131526.56, 6);
+    });
+});
+
+describe('default_entry_qty with a negative fill price', () => {
+    it('10 % of equity: the quantity is negative, truncated toward zero (BINANCE:BTCUSDT 1h)', async () => {
+        const v = await run(
+            'initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10',
+            'plot(strategy.default_entry_qty(-close), "q")',
+            [[63114.68, 63134.83, 63042, 63075.43]],
+            BTC,
+        );
+        // TradingView: −0.15854 (10,000 / −63,075.43 = −0.1585404…).
+        expect(v('q')[0]).toBeCloseTo(-0.15854, 10);
+    });
+
+    it('per-contract commission: the signed price stays in the formula (NYMEX:CL1! back-adjusted 1D)', async () => {
+        const v = await run(
+            'initial_capital = 1000000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, margin_long = 0, margin_short = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 3',
+            `plot(strategy.default_entry_qty(close), "q")
+plot(strategy.default_entry_qty(-close), "qn")
+plot(strategy.default_entry_qty(-100), "q100")
+plot(strategy.default_entry_qty(-1), "q1")`,
+            [[-27, -26, -28, -27.52]],
+            CL,
+        );
+        // TradingView: −3, 3, −1 and −100 (100,000 / (−1,000 + 3) = −100.3).
+        expect(v('q')[0]).toBe(-3);
+        expect(v('qn')[0]).toBe(3);
+        expect(v('q100')[0]).toBe(-1);
+        expect(v('q1')[0]).toBe(-100);
+    });
 });
