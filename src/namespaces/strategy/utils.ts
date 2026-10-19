@@ -1543,9 +1543,10 @@ export function riskAfterFill(context: any, price: number): void {
     if (rules.max_intraday_filled_orders && st.dayFills >= Number(rules.max_intraday_filled_orders.count)) {
         return riskCloseOut(context, RISK_REASON.orders, price, 'day');
     }
-    // The check after a fill sees the equity before the P&L that fill closed is booked (TV, BTCUSDT 1h,
+    // The check after a reversal sees the equity before the P&L its closing leg booked (TV, BTCUSDT 1h,
     // 1,500 cash: a short held from the previous day reversed for +1,260.68, equity 93,183.19 for
-    // 93,462.83 at the day start → closed at that open; 27 halts of 27).
+    // 93,462.83 at the day start → closed at that open; 27 halts of 27). After a close order the P&L
+    // is booked (BTCUSDT 1h, 1 %: close_all at +228 mid-day, trading goes on).
     if (rules.max_intraday_loss && !riskOpenFills(context)) riskIntradayLoss(context, price, fillPnl);
 }
 
@@ -2048,8 +2049,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
 
     strategy.position_size = newSize;
     updateMaxContractsHeld(strategy, context, newSize - currentSize, exitPrice, !closeInfo?.forced);
-    // The P&L an order fill books, for the risk check after it (see riskAfterFill).
-    if (!closeInfo?.forced) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
+    // The P&L a reversal's closing leg books, for the risk check after the fill (see riskAfterFill).
+    if (closeInfo?.isImplicitReversal) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
 
     if (newSize === 0) {
         strategy.position_avg_price = NaN;

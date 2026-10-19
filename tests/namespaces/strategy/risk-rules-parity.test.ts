@@ -145,6 +145,24 @@ if bar_index == 5
         ]);
     });
 
+    it('a close order booking a profit mid-day is checked against the booked equity', async () => {
+        // long 10 from 100, 100 of open profit at the day start (bar 4); close_all at the 110 open of
+        // bar 6 books it; the short placed on bar 6 fills on bar 7 (TV, BTCUSDT 1h, 1 %: trading goes on)
+        const s = await run(
+            '',
+            `strategy.risk.max_intraday_loss(50, strategy.cash)
+if bar_index == 0
+    strategy.entry("L", strategy.long, qty = 10)
+if bar_index == 5
+    strategy.close_all()
+if bar_index == 6
+    strategy.entry("S", strategy.short, qty = 10)`,
+            [flat(100), [100, 105, 100, 105], [105, 110, 105, 110], flat(110), flat(110), flat(110), flat(110), flat(110), flat(110)],
+        );
+        expect(rows(s)).toEqual([['L', 1, 'Close position order', 110, 6]]);
+        expect(s.opentrades.map((t: any) => [t.entry_id, t.entry_bar_index])).toEqual([['S', 7]]);
+    });
+
     it('daily bars: the day starts at the open, a gap is not an intraday loss', async () => {
         // long 10 at 100; bar 2 gaps down to 90 (low 89.50: 5 from the open, 105 from the close);
         // bar 3 drops 6 from its open → closed at 84
