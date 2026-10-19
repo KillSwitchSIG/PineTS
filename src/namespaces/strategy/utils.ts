@@ -953,10 +953,18 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 order.fill_bar = context.idx;
                 order.fill_time = currentTime;
                 riskAfterFill(context, fillPrice);
-            } else {
-                order.status = 'cancelled';
+                return;
             }
-            return;
+            // Placed against a position in the allowed direction that another exit closed before it
+            // filled: it sells / buys that position's size, opening a position (TV, BTCUSDT 1h: a sell
+            // stop of 0.08051 after the long of 0.08051 was closed by its exit, then a short of 0.08051).
+            const exitQty = order._isReversalEntry && (order as any)._base_qty !== undefined ? order.qty - (order as any)._base_qty : 0;
+            if (posSize !== 0 || !(exitQty > 1e-9)) {
+                order.status = 'cancelled';
+                return;
+            }
+            order.qty = exitQty;
+            (order as any)._base_qty = exitQty;
         }
         if (rules.max_position_size !== undefined) {
             const max = Number(rules.max_position_size);
