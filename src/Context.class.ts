@@ -81,6 +81,11 @@ export class Context {
     /** Alert mode: 'realtime' = only fire on live bars (TV behavior), 'all' = fire on every bar (backtest). */
     public _alertMode: 'realtime' | 'all' = 'realtime';
 
+    /** The strategy broker trades on the tick grid (see PineTS.setFillsOnTickGrid). */
+    public _fillsOnTickGrid: boolean = false;
+    /** The current bar's raw prices while the broker works on its tick-grid copy. */
+    public _rawBar?: { open: number; high: number; low: number; close: number };
+
     /** Name-keyed map of declaration-prop overrides from `Indicator.prop`. Layered on top of
      *  the source's `indicator()`/`strategy()` call args inside the per-bar handlers
      *  (see Core.indicator and initializeStrategy). Empty object when no overrides are set. */
@@ -725,9 +730,10 @@ export class Context {
      * - Subsequent bars: maintains the previous value (state).
      * @param trg - The target variable
      * @param src - The source initializer value
+     * @param varip - true for a `varip` declaration (exempt from the per-bar rollback)
      * @returns Series object
      */
-    initVar(trg, src: any): Series {
+    initVar(trg, src: any, varip: boolean = false): Series {
         // If target exists (subsequent bars), return it as is.
         // PineTS automatically shifts context variables by copying the last value,
         // so the previous value is already carried over to the current slot.
@@ -768,7 +774,9 @@ export class Context {
             value = this.precision(src);
         }
 
-        return this.typedSeries([value], value);
+        const series = this.typedSeries([value], value);
+        if (varip) series.varip = true;
+        return series;
     }
 
     /**
