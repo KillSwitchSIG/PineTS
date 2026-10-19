@@ -13,7 +13,8 @@
 //   - a stop entry sized to reverse a position that another exit closed first fills its whole
 //     quantity from flat when its base quantity fits, then the margin call trims it (ES1! 1D: sell
 //     stop of 2 + 2 after the long's stop exit, 4 contracts at 4,363.25 for equity 865,776, margin
-//     call 1 contract at the low, 3 held to the exit).
+//     call 1 contract at the low, 3 held to the exit); when its own quantity does not fit, the part
+//     sized to close the position fills alone (BATS:AAPL 1D: 205 + 209 shares, a short of 205).
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Indicator } from '../../../src';
@@ -111,5 +112,22 @@ if bar_index == 1
             ['SS', 'Close position order', 94, 1],
         ]);
         expect(s.position_size).toBe(-3);
+    });
+
+    it('fills only the part sized to close the position when its own quantity does not fit', async () => {
+        // TV, BATS:AAPL 1D: 205 + 209 shares after the long of 205 closed at 44.95; 209 × 44.95 =
+        // 9,394.55 against 9,348.77 → a short of 205. Here: long 10 at 100, capital 1,000; sell stop 96
+        // sized 10 + 11 after the long's stop exit at 97 (equity 970, 11 × 96 = 1,056) → short 10
+        const s = await run(
+            ', initial_capital = 1000, margin_long = 100, margin_short = 100',
+            `if bar_index == 0
+    strategy.entry("L", strategy.long, qty = 10)
+if bar_index == 1
+    strategy.entry("SS", strategy.short, stop = 96, qty = 11)
+    strategy.exit("XL", "L", stop = 97)`,
+            [flat(100), flat(100), [99, 99.5, 94, 94.5], flat(94.5)],
+        );
+        expect(rows(s)).toEqual([['L', 'XL', 97, 10]]);
+        expect(s.opentrades.map((t: any) => [t.entry_id, t.entry_price, t.size])).toEqual([['SS', 96, -10]]);
     });
 });

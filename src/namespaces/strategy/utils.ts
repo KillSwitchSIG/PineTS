@@ -1058,7 +1058,12 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 requiredMargin > availableEquity && (order as any)._reversesPending && oldSize === 0 && part > 0 && !fits(order.qty - part) && fits(part);
             if (partFills) order.qty = part;
 
-            if (requiredMargin > availableEquity && !partFills) {
+            // ...and when its own quantity does not fit, the part sized to close the position fills
+            // alone (TV, AAPL 1D: 205 + 209 shares after the long of 205 closed at 44.95, 209 × 44.95 =
+            // 9,394.55 against 9,348.77 → a short of 205).
+            if (requiredMargin > availableEquity && orphanedReversal && order.qty - baseQty > 1e-9) {
+                order.qty -= baseQty;
+            } else if (requiredMargin > availableEquity && !partFills) {
                 // TV broker emulator: the margin check only guards the
                 // OPEN leg. On a reversal, the close leg always
                 // executes (it frees margin / realizes the position) —
