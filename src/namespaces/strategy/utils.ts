@@ -547,14 +547,16 @@ function entryPathPosition(o: Order, fillPrice: number | undefined, path: number
  * A filled OCA order acts on the other pending orders of its group: strategy.oca.cancel cancels
  * them, strategy.oca.reduce takes the filled quantity off them (cancelled when nothing is left).
  */
-function applyOca(strategy: StrategyState, filled: Order, filledQty?: number): void {
+function applyOca(strategy: StrategyState, filled: Order, filledQty?: number, notReduced?: (o: Order) => boolean): void {
     const qty = filledQty ?? Math.abs((filled as any)._base_qty ?? filled.qty);
     for (const o of strategy.pending_orders) {
         // A group is its name and its type together (TV: a reduce-type and a cancel-type order sharing a
         // name both fill).
         if (o === filled || o.status !== 'pending' || o.oca_name !== filled.oca_name || o.oca_type !== filled.oca_type) continue;
         if (filled.oca_type === 'cancel') o.status = 'cancelled';
-        else if ((o.category ?? 'entry') === 'exit' && !(o.qty > 0)) {
+        else if (notReduced?.(o)) {
+            // triggered together with the filled order (see processStrategyOrders)
+        } else if ((o.category ?? 'entry') === 'exit' && !(o.qty > 0)) {
             // an exit without a fixed quantity covers whatever is left: nothing to take off it
         } else {
             o.qty = Math.max(0, o.qty - qty);
@@ -604,6 +606,24 @@ function exitFirstLegAt(context: any, o: Order, path: number[]): number {
         }
     }
     return first;
+}
+
+/**
+ * How far from `open` the nearest stop / limit leg of an exit is, among the legs the bar opens past;
+ * undefined when it opens past none.
+ */
+function exitGapDistance(context: any, o: Order, open: number): number | undefined {
+    if (isMarketCloseOrder(o)) return undefined;
+    const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    let nearest: number | undefined;
+    for (const t of context.strategy.opentrades) {
+        if (o.from_entry && t.entry_id !== o.from_entry) continue;
+        const dir = Math.sign(t.size);
+        const { tp, sl } = exitBracket(o, t._bracket_entry ?? t.entry_price, dir, mintick);
+        if (tp !== undefined && dir * (open - tp) >= 0) nearest = Math.min(nearest ?? Infinity, Math.abs(open - tp));
+        if (sl !== undefined && dir * (sl - open) >= 0) nearest = Math.min(nearest ?? Infinity, Math.abs(open - sl));
+    }
+    return nearest;
 }
 
 /**
@@ -663,9 +683,16 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
     // Market orders fill at the open before the stops and limits the bar opens past (TV, AAPL / NVDA
     // / TSLA 1D: a market long and an older short stop entry gapped through fill long first).
     const typeRank = (o: Order) => ((o.category ?? 'entry') === 'exit' ? 0 : o.type === 'market' ? 0 : o.type === 'limit' ? 2 : 1);
+    // Stops or limits the bar opens past fill nearest the open first, whatever the order they were
+    // placed in (TV, AAPL 1D: buy stops at 27.23 / 27.31 and an open of 27.7775 fill 27.31 first).
+    const gapDistance = (o: Order, at: number) => {
+        if (at !== 0 || o.type === 'market' || (o.category ?? 'entry') === 'exit') return 0;
+        const level = o.type === 'limit' ? o.limit : o.stop;
+        return level === undefined ? 0 : Math.abs(level - openPrice);
+    };
     const queue = pending_orders
         .map((o, i) => ({ o, i, at: fillAt(o) }))
-        .sort((a, b) => a.at - b.at || typeRank(a.o) - typeRank(b.o) || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
+        .sort((a, b) => a.at - b.at || typeRank(a.o) - typeRank(b.o) || gapDistance(a.o, a.at) - gapDistance(b.o, b.at) || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
         .map((x) => x.o);
     // The position held before this bar's fills: margin is checked against it (see fillEntryOrder).
     if (!deferredOnly) (strategy as any)._preFillSize = { idx: context.idx, size: strategy.position_size };
@@ -857,7 +884,14 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                     fillEntryOrder(context, fill, fillPrice, currentTime, openPrice);
                 });
             }
-            if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) applyOca(strategy, order);
+            if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) {
+                // Stops the bar opens past all trigger at the open: a reduce-type fill does not reduce the
+                // others (TV, AAPL 1D: stop entries of 3 and 2 both fill in full; limits are reduced, and
+                // a cancel-type fill still cancels).
+                const gappedStop = (o: Order) =>
+                    o.type === 'stop' && o.stop !== undefined && o.bar < context.idx && (o.category ?? 'entry') !== 'exit' && (parseDirection(o.direction) === 1 ? openPrice >= o.stop : openPrice <= o.stop);
+                applyOca(strategy, order, undefined, gappedStop(order) ? gappedStop : undefined);
+            }
             // A limit / stop fill at its level inside the bar: tag the trades it opened, so their exits
             // on this bar only see the path after the fill (see entryBarPathExit).
             if ((order.status as Order['status']) === 'filled' && order.type !== 'market' && fillPrice !== openPrice) {
@@ -2421,10 +2455,17 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         Series.from(context.data.low).get(0),
         Series.from(context.data.close).get(0),
     );
-    const ordered = strategy.pending_orders
+    const ranked = strategy.pending_orders
         .map((o, i) => ({ o, i, at: phase === 'intrabar' && (o.category ?? 'entry') === 'exit' ? exitFirstLegAt(context, o, exitPath) : 0 }))
-        .sort((a, b) => a.at - b.at || a.i - b.i)
-        .map((x) => x.o);
+        .sort((a, b) => a.at - b.at || a.i - b.i);
+    // Exits whose stop / limit the bar opens past fill nearest the open first (TV, AAPL 1D: take-profits
+    // at 27.43 and 27.52 with an open of 27.95 book the 27.52 one first); other orders keep their place.
+    const gapped = ranked
+        .map((x, slot) => ({ x, slot, d: x.at === 0 && (x.o.category ?? 'entry') === 'exit' ? exitGapDistance(context, x.o, openPrice) : undefined }))
+        .filter((g): g is { x: (typeof ranked)[number]; slot: number; d: number } => g.d !== undefined);
+    const slots = gapped.map((g) => g.slot);
+    gapped.sort((a, b) => a.d - b.d || a.slot - b.slot).forEach((g, j) => (ranked[slots[j]] = g.x));
+    const ordered = ranked.map((x) => x.o);
     for (const order of ordered) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
