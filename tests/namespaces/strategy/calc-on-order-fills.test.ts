@@ -85,7 +85,7 @@ if bar_index % 2 == 1
     });
 
     it('varip is not rolled back between the runs of a bar', async () => {
-        // TradingView, BINANCE:BTCUSDT 1h (probe "cof01", first 13 bars): bar 1 runs three times (fill at
+        // TradingView, BINANCE:BTCUSDT 1h (market entry then a strategy.order on its fill, first 13 bars): bar 1 runs three times (fill at
         // the open, the in-fill order's fill, the close) and bar 11 twice. `var int n` is rolled back,
         // `varip int m` keeps counting every run.
         const tvBars: Bar[] = [
