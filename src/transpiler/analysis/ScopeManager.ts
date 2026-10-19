@@ -71,6 +71,8 @@ export class ScopeManager {
     private arrayPatternElements: Set<string> = new Set();
     private rootParams: Set<string> = new Set();
     private localSeriesVars: Set<string> = new Set();
+    /** Parameters of the user function being transformed (a subset of localSeriesVars). */
+    private functionParams: Set<string> = new Set();
     private varKinds: Map<string, string> = new Map();
     private loopVars: Set<string> = new Set();
     private loopVarNames: Map<string, string> = new Map(); // Map original names to transformed names
@@ -285,6 +287,20 @@ export class ScopeManager {
 
     isLocalSeriesVar(name: string): boolean {
         return this.localSeriesVars.has(name);
+    }
+
+    addFunctionParam(name: string): void {
+        this.functionParams.add(name);
+        this.localSeriesVars.add(name);
+    }
+
+    removeFunctionParam(name: string): void {
+        this.functionParams.delete(name);
+        this.localSeriesVars.delete(name);
+    }
+
+    isFunctionParam(name: string): boolean {
+        return this.functionParams.has(name);
     }
 
     // ── UDT registry ────────────────────────────────────────────────────

@@ -1049,8 +1049,9 @@ export class PineTS {
                         if (item.data.length > snapInfo.len) {
                             item.data.length = snapInfo.len;
                         }
-                        // Restore the last value (which may have been modified in-place)
-                        if (snapInfo.len > 0 && snapInfo.lastVal !== undefined) {
+                        // Restore the last value (which may have been modified in-place).
+                        // A `varip` keeps the value the discarded execution left in it.
+                        if (snapInfo.len > 0 && snapInfo.lastVal !== undefined && !item.varip) {
                             item.data[snapInfo.len - 1] = snapInfo.lastVal;
                         }
                     }

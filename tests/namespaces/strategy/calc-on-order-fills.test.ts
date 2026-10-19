@@ -7,7 +7,7 @@
 // stop orders work on the rest of the path. `var` is rolled back between the runs of a bar; plots
 // come from the bar's last run.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PineTS, Indicator } from '../../../src';
 
 type Bar = [number, number, number, number]; // open, high, low, close
@@ -82,6 +82,58 @@ if bar_index % 2 == 1
             [flat(), flat(101), flat(102), flat(103), flat(104), flat(105)],
         );
         expect((ctx.plots['n'].data as any[]).map((p) => p.value)).toEqual([1, 2, 3, 4, 5, 6]);
+    });
+
+    it('varip is not rolled back between the runs of a bar', async () => {
+        // TradingView, BINANCE:BTCUSDT 1h (market entry then a strategy.order on its fill, first 13 bars): bar 1 runs three times (fill at
+        // the open, the in-fill order's fill, the close) and bar 11 twice. `var int n` is rolled back,
+        // `varip int m` keeps counting every run.
+        const tvBars: Bar[] = [
+            [63865.84, 63915, 63742, 63766.8], [63766.8, 63786.49, 63587.99, 63782.64], [63782.65, 63818.16, 63586, 63651.19],
+            [63651.2, 63660.76, 63350, 63484.3], [63484.31, 63710, 63450, 63697.76], [63697.76, 63850, 63566, 63724],
+            [63723.99, 63999, 63686, 63859.45], [63859.46, 63940.08, 63420, 63420.01], [63420.01, 63568.97, 62802.27, 63160.13],
+            [63160.13, 63294.61, 63074.44, 63144.38], [63144.37, 63369.63, 63105.44, 63310], [63310, 63519.39, 63310, 63407.99],
+            [63408, 63474.34, 63368, 63415.55],
+        ];
+        // [bar_index, n, m] per run, as logged on TradingView
+        const tvRuns = [
+            [0, 1, 1], [1, 2, 2], [1, 2, 3], [1, 2, 4], [2, 3, 5], [3, 4, 6], [4, 5, 7], [5, 6, 8], [6, 7, 9], [7, 8, 10],
+            [8, 9, 11], [9, 10, 12], [10, 11, 13], [11, 12, 14], [11, 12, 15], [12, 13, 16],
+        ];
+        const lines: string[] = [];
+        const spy = vi.spyOn(console, 'log').mockImplementation((...a: any[]) => {
+            lines.push(a.join(' '));
+        });
+        let ctx: any;
+        try {
+            ctx = await run(
+                COF,
+                `var int n = 0
+varip int m = 0
+n += 1
+m += 1
+log.info("X|{0}|{1}|{2}", bar_index, n, m)
+plot(m, "m")
+var int filledAt = -1
+if bar_index % 40 == 0
+    strategy.entry("E", strategy.long)
+if strategy.position_size > 0 and filledAt != bar_index and strategy.opentrades == 1
+    filledAt := bar_index
+    strategy.order("O", strategy.long, comment = "in-fill")
+if bar_index % 40 == 10
+    strategy.close_all()`,
+                tvBars,
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        const runs = lines
+            .map((l) => l.match(/X\|(\d+)\|(\d+)\|(\d+)/))
+            .filter(Boolean)
+            .map((m) => [+m![1], +m![2], +m![3]]);
+        expect(runs).toEqual(tvRuns);
+        // plots come from each bar's last run
+        expect((ctx.plots['m'].data as any[]).map((p) => p.value)).toEqual([1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16]);
     });
 });
 
