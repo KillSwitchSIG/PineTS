@@ -1605,9 +1605,9 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         // context (`$.let.<name>` → undefined) instead of the JS parameter.
         node.params.forEach((param: any) => {
             if (param.type === 'Identifier') {
-                scopeManager.addLocalSeriesVar(param.name);
+                scopeManager.addFunctionParam(param.name);
             } else if (param.type === 'AssignmentPattern' && param.left?.type === 'Identifier') {
-                scopeManager.addLocalSeriesVar(param.left.name);
+                scopeManager.addFunctionParam(param.left.name);
             }
         });
 
@@ -1652,9 +1652,9 @@ export function transformFunctionDeclaration(node: any, scopeManager: ScopeManag
         // Clean up: remove function parameters from local series vars after exiting function scope
         node.params.forEach((param: any) => {
             if (param.type === 'Identifier') {
-                scopeManager.removeLocalSeriesVar(param.name);
+                scopeManager.removeFunctionParam(param.name);
             } else if (param.type === 'AssignmentPattern' && param.left?.type === 'Identifier') {
-                scopeManager.removeLocalSeriesVar(param.left.name);
+                scopeManager.removeFunctionParam(param.left.name);
             }
         });
         if (paramTypes) {

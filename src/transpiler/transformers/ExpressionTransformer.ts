@@ -789,9 +789,11 @@ function transformIdentifierForParam(node: any, scopeManager: ScopeManager): any
         // This handles the case where internal parameter names (p1, p2, etc.) collide with user variables
         const [scopedName, kind] = scopeManager.getVariable(node.name);
         const isUserVariable = scopedName !== node.name; // If renamed, it's a user variable
+        // A function parameter shadows a same-named variable declared outside the function.
+        const isShadowingParam = scopeManager.isFunctionParam(node.name) && !scopeManager.isVariableInFunctionScope(node.name);
 
         // If it's a local series variable (hoisted parameter) AND NOT a user variable, return as is
-        if (scopeManager.isLocalSeriesVar(node.name) && !isUserVariable) {
+        if (scopeManager.isLocalSeriesVar(node.name) && (!isUserVariable || isShadowingParam)) {
             return node;
         }
 
