@@ -1388,6 +1388,7 @@ type RiskState = {
     blockFrom?: number; // orders placed from this bar to blockTo (the end of the blocked day) are rejected
     blockTo?: number;
     haltedFrom?: number; // orders placed on or after this bar are rejected
+    dayStartBar?: number; // the day's first bar, until its open fills are done (see riskOpenFills)
 };
 
 function riskState(context: any): RiskState {
@@ -1485,6 +1486,22 @@ export function riskStartBar(context: any): void {
     st.dayStartEquity = strategy.equity;
     st.dayMaxEquity = strategy.equity;
     st.dayFills = 0;
+    st.dayStartBar = context.idx;
+}
+
+/**
+ * max_intraday_loss: the day starts at the open of its first bar, after the fills there, which are
+ * not checked against it (TV, AAPL 1D, 1 %: a gap down from 55.60 to 52.39 keeps the trade, the loss
+ * counted from the open; BTCUSDT 1D: a long reversed at the open for +1,996 against a 1,500 limit
+ * goes on). Called before the bar's fills and after each fill at the open.
+ */
+function riskOpenFills(context: any): boolean {
+    const st = (context.strategy as any)._risk as RiskState | undefined;
+    if (!st || st.dayStartBar !== context.idx || !(context._pathAt === undefined || context._pathAt === 0)) return false;
+    const seg = context._excSeg;
+    if (seg && seg.scale > 0) return false;
+    st.dayStartEquity = st.dayMaxEquity = computeEquityAtPrice(context, Series.from(context.data.open).get(0));
+    return true;
 }
 
 /** After an order filled at `price`: filled-order count, realized drawdown, intraday loss. */
@@ -1493,6 +1510,8 @@ export function riskAfterFill(context: any, price: number): void {
     // Order fills (entries, exits, closes; not margin calls or risk close-outs): calc_on_order_fills
     // runs the script again after the bar points where this count moved.
     if (strategy) (strategy as any)._fillCount = ((strategy as any)._fillCount ?? 0) + 1;
+    const fillPnl = (strategy as any)?._fillPnl ?? 0;
+    if (strategy) (strategy as any)._fillPnl = 0;
     const rules = strategy?.risk_rules;
     if (!rules || Object.keys(rules).length === 0) return;
     const st = riskState(context);
@@ -1509,10 +1528,13 @@ export function riskAfterFill(context: any, price: number): void {
     if (rules.max_intraday_filled_orders && st.dayFills >= Number(rules.max_intraday_filled_orders.count)) {
         return riskCloseOut(context, RISK_REASON.orders, price, 'day');
     }
-    if (rules.max_intraday_loss) riskIntradayLoss(context, price);
+    // The check after a fill sees the equity before the P&L that fill closed is booked (TV, BTCUSDT 1h,
+    // 1,500 cash: a short held from the previous day reversed for +1,260.68, equity 93,183.19 for
+    // 93,462.83 at the day start → closed at that open; 27 halts of 27).
+    if (rules.max_intraday_loss && !riskOpenFills(context)) riskIntradayLoss(context, price, fillPnl);
 }
 
-function riskIntradayLoss(context: any, price: number): boolean {
+function riskIntradayLoss(context: any, price: number, unbooked = 0): boolean {
     const strategy: StrategyState = context.strategy;
     const rule = strategy.risk_rules.max_intraday_loss;
     if (!rule) return false;
@@ -1520,7 +1542,7 @@ function riskIntradayLoss(context: any, price: number): boolean {
     if (st.blockedDay === st.day) return false;
     const equity = strategy.position_size !== 0 ? computeEquityAtPrice(context, price) : strategy.initial_capital + strategy.netprofit;
     st.dayMaxEquity = Math.max(st.dayMaxEquity, equity);
-    const loss = st.dayStartEquity - equity;
+    const loss = st.dayStartEquity - (equity - unbooked);
     const v = Number(rule.value);
     const limit = rule.type === 'percent_of_equity' ? (v / 100) * st.dayMaxEquity : v;
     if (loss >= limit - 1e-9) {
@@ -1842,6 +1864,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     let remainingQty = qtyToClose;
+    const netprofitBefore = strategy.netprofit;
 
     // Close trades from oldest to newest (FIFO)
     const tradesToClose = [...strategy.opentrades];
@@ -1983,6 +2006,8 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     strategy.position_size = newSize;
     const forced = closeInfo?.exitId === MARGIN_CALL_EXIT_ID || (closeInfo?.exitId !== RISK_REASON.consDays && Object.values(RISK_REASON).includes(closeInfo?.exitId as any));
     updateMaxContractsHeld(strategy, context, newSize - currentSize, !forced);
+    // The P&L an order fill books, for the risk check after it (see riskAfterFill).
+    if (!forced) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
 
     if (newSize === 0) {
         strategy.position_avg_price = NaN;
@@ -3185,6 +3210,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
  */
 export function processBarOrders(context: any): void {
     if (context.strategy) (context.strategy as any)._openFills = { idx: context.idx, start: context.strategy.position_size, buys: 0, sells: 0, real: [] };
+    if (context.strategy?.risk_rules?.max_intraday_loss) riskOpenFills(context);
     // The account where the market orders filling at this open were placed: the previous close (a
     // calc_on_order_fills segment after the first: its starting point), for their margin check.
     if (context.strategy) {
