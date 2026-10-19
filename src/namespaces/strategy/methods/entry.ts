@@ -5,6 +5,7 @@ import { calculateOrderQty, parseDirection, wouldExceedPyramiding, roundOrderLev
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { checkOrderQty, checkPendingDirection } from '../validation';
 
 /**
  * Pine signature:
@@ -65,6 +66,8 @@ export function entry(context: any) {
 
         const dir = parseDirection(directionVal);
         const strategy = context.strategy;
+        checkOrderQty('strategy.entry', qtyValue);
+        checkPendingDirection('strategy.entry', strategy, idValue, dir);
 
         // Project the position forward over MARKET entry orders already queued
         // on THIS bar: they fill (in queue order) before this one, so the
