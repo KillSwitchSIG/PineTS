@@ -219,8 +219,9 @@ export function computeHeldMargin(context: any, atPrice: number): number {
 /**
  * Order quantity. Cash and percent-of-equity orders are sized at the expected fill price, slippage
  * included when the order would take it (`withSlippage`: market and stop orders, not limits).
+ * `signed`: a negative quantity (negative fill price) is kept, truncated toward zero, instead of 0.
  */
-export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number, withSlippage = true): number {
+export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number, withSlippage = true, signed = false): number {
     const strategy: StrategyState = context.strategy;
 
     // Get qty type and value, calling functions if needed
@@ -277,6 +278,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
         default:
             rawQty = qtyValue;
     }
+    if (signed && rawQty < 0) return -floorQty(context, -rawQty);
     return floorQty(context, rawQty);
 }
 
