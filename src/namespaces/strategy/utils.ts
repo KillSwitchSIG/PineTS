@@ -1561,6 +1561,32 @@ function riskIntradayLoss(context: any, price: number, unbooked = 0): boolean {
     return false;
 }
 
+/**
+ * After a margin call at `price`: max_drawdown on the equity there, open profit included; when reached,
+ * the position is closed at the bar's close, after the script (see riskAtBarClose). TV, BTCUSDT 1h,
+ * 100 % of equity: a call at the 66,011.47 high leaves 9,690.60, 3.0940 % under the 10,000 peak →
+ * closed at the 65,978.79 close with limits up to 3.092 %, not 3.10 %; 3.047 % at that close.
+ */
+function riskAfterMarginCall(context: any, price: number): void {
+    const strategy: StrategyState = context.strategy;
+    const rule = strategy.risk_rules?.max_drawdown;
+    if (!rule) return;
+    const st = riskState(context);
+    if (st.haltedFrom !== undefined) return;
+    const dd = st.realizedPeak - computeEquityAtPrice(context, price);
+    const v = Number(rule.value);
+    if (rule.type === 'percent_of_equity' ? (100 * dd) / st.realizedPeak >= v - 1e-12 : dd >= v - 1e-9) (st as any)._drawdownAtClose = context.idx;
+}
+
+/** At the bar's close, after the script: a max_drawdown close-out scheduled by a margin call on this bar. */
+export function riskAtBarClose(context: any): void {
+    const st = (context.strategy as any)?._risk as RiskState | undefined;
+    if (!st || (st as any)._drawdownAtClose !== context.idx) return;
+    (st as any)._drawdownAtClose = undefined;
+    setFillAt(context, 3);
+    riskCloseOut(context, RISK_REASON.drawdown, Series.from(context.data.close).get(0), 'forever');
+}
+
 /** After the bar's fills: max_intraday_loss at the bar's adverse extreme for the open position. */
 export function riskEndOfBarFills(context: any): void {
     const strategy: StrategyState = context.strategy;
@@ -3151,6 +3177,7 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
             exitId: MARGIN_CALL_EXIT_ID,
             exitComment: 'Margin call',
         });
+        riskAfterMarginCall(context, adversePrice);
 
         // ---- Phantom re-check → SECOND margin call at the bar's CLOSE ----
         // TV broker-emulator behavior (reverse-engineered 2026-06-12,

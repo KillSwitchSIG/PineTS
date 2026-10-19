@@ -14,6 +14,13 @@
 //     day happens still fills before the close-out (BTCUSDT 1h, n = 4: close_all queued after a
 //     pyramiding add, both at one open: the three older lots "Close position order", only the add
 //     "Close Position (Max number of filled orders in one day)").
+//   - max_drawdown: after a margin call, the drawdown of the equity at the call's price (open profit
+//     included) from the realized peak is checked; when reached, the position is closed at the bar's
+//     close and trading stops (BTCUSDT 1h, 100 % of equity: a call of 0.00284 at the 66,011.47 high
+//     leaves 9,690.60, 3.0940 % under 10,000 → "Close Position (Max Drawdown)" at the 65,978.79 close
+//     with limits of 3 %, 3.07 %, 3.09 % and 3.092 %, none at 3.10 %; with 3.07 % the equity at the
+//     close is 3.047 % under the peak). Without a margin call a bar's close is not checked (BTCUSDT 1D,
+//     5 %: 8.07 % at a close, closed only at the next fill).
 
 import { describe, it, expect } from 'vitest';
 import { PineTS, Indicator } from '../../../src';
@@ -87,6 +94,34 @@ if bar_index == 6
             ['S3', 7, 'Close Position (Max number of filled orders in one day)', 107, 7],
         ]);
         expect(s.position_size).toBe(0);
+    });
+});
+
+describe('max_drawdown', () => {
+    const decl = ', initial_capital = 600, pyramiding = 2, margin_long = 50, margin_short = 50';
+    const body = (limit: number) => `strategy.risk.max_drawdown(${limit}, strategy.percent_of_equity)
+if bar_index == 0
+    strategy.entry("L", strategy.long, qty = 10)
+if bar_index == 3
+    strategy.entry("L2", strategy.long, qty = 1)`;
+    // long 10 at 100 on 600 at 50 % margin; bar 2 falls to 79 (equity 390 for 395 of margin → call
+    // of 1 at 79: realized 579, 3.5 % under 600; equity 390 at the call, 35 %) and closes at 95
+    // (534, 11 %)
+    const bars: Bar[] = [flat(100), [100, 100.5, 99.5, 100], [99, 99.5, 79, 95], flat(95), flat(95), flat(95)];
+
+    it('after a margin call: checked at the call price, closed at the bar close, trading stops', async () => {
+        const s = await run(decl, body(20), bars);
+        expect(rows(s)).toEqual([
+            ['L', 1, 'Close position order', 79, 2],
+            ['L', 1, 'Close Position (Max Drawdown)', 95, 2],
+        ]);
+        expect(s.opentrades).toHaveLength(0);
+    });
+
+    it('a drawdown at the call price under the limit leaves the position open', async () => {
+        const s = await run(decl, body(40), bars);
+        expect(rows(s)).toEqual([['L', 1, 'Close position order', 79, 2]]);
+        expect(s.opentrades.map((t: any) => [t.entry_id, Math.abs(t.size)])).toEqual([['L', 9], ['L2', 1]]);
     });
 });
 
