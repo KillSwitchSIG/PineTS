@@ -5,6 +5,7 @@ import { calculateOrderQty, parseDirection, sizingPrice, roundOrderLevel, broker
 import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
+import { checkOrderQty, checkPendingDirection } from '../validation';
 
 /**
  * Pine signature for strategy.order():
@@ -80,6 +81,8 @@ export function order(context: any) {
 
         // Parse direction to numeric (+1 long, -1 short)
         const dir = parseDirection(directionVal);
+        checkOrderQty('strategy.order', qtyValue);
+        checkPendingDirection('strategy.order', context.strategy, idValue, dir);
 
         // Reference price for qty conversion (cash / percent_of_equity sizing).
         // The order itself fills at the NEXT bar's open, but qty is locked in
