@@ -1,5 +1,56 @@
 # Change Log
 
+## [0.12.0-atlas.1] - 2026-10-21 - Fork fixes (KillSwitchSIG/PineTS, branch atlas-fixes)
+
+Upstream 0.12.0 (Strategy Broker Emulator Parity) with the fork's atlas fixes carried forward unchanged: the plot call-site keys, array-source `syminfo`, secondary-context slicing, multi-call `request.security` functions, gradient `fill()` named arguments and whole-share sizing for stocks / funds (see 0.11.1-atlas.1), and the named-argument drawing setters (see 0.11.1-atlas.2).
+
+## [0.12.0] - 2026-10-19 - Strategy Broker Emulator Parity
+
+This release rebuilds the strategy broker emulator on TradingView's intrabar path (open → nearer extreme → farther extreme → close) and aligns orders, fills, margin, risk rules, excursions and the reporting getters with TradingView. Every rule was measured on TradingView strategy runs (BINANCE:BTCUSDT 1h / 1D, BATS:AAPL / NVDA / TSLA 1D, CME ES1! 1D, FX:EURUSD 1h, back-adjusted NYMEX CL1! 1D) and is pinned by tests whose expected values come from those runs.
+
+### Added
+
+- **`PineTS.setFillsOnTickGrid(enabled)`**, on by default (#441). Split / dividend adjusted feeds carry prices between ticks (AAPL opens such as 40.8125 with a 0.01 tick). TradingView's broker trades those bars at the nearest tick: fills, triggers, trailing stops, margin checks and close-based sizing use the tick-grid prices while the script still sees the raw ones. Bars already on the grid (crypto, forex, futures, back-adjusted continuous futures) are unaffected. `setFillsOnTickGrid(false)` keeps the raw feed prices.
+- **`strategy(calc_on_order_fills = true)`** on historical bars (#433): the script runs again after each bar point with fills, sees the broker state at that point, and its orders work on the rest of the bar's path. `var` is rolled back between the runs of a bar and plots come from the last run; `varip` keeps its value (#453).
+- **`strategy.closedtrades.first_index`** and TradingView's 9,000-trade window (#451): only the last 9,000 closed trades stay listed, `first_index = max(0, closedtrades − 9000)`, and a trade below it reads as out of range. Counts and aggregates still cover every trade.
+- **Order argument validation** (#452), with TradingView's messages: a negative `qty` in `strategy.entry` / `strategy.order`, a `qty_percent` outside (0, 100] in `strategy.exit` (outside [0, 100] in `strategy.close`), re-placing a pending entry / order id with the other direction, and a `strategy.exit` with no price leg raise a `PineRuntimeError`.
+
+### Changed
+
+- **Pine v5 strategies default to margin 0** (no margin model), as on TradingView, and `percent_of_equity` is capped at 100 % of equity without a margin model (#435). A v5 strategy sized above 100 % of equity previously had every order rejected.
+- **Scripts with the invalid order arguments listed above now stop with a runtime error** instead of running with a silently adjusted order.
+- **`ta.*` window functions run in O(1) / O(log n) per bar** (#395); `ta.pivothigh` / `ta.pivotlow`, `ta.valuewhen` and `math.sum` on sparse sources were quadratic in the number of bars. Output is identical, except inside local blocks, where the functions now see TradingView's history.
+
+### Fixed
+
+#### Orders and fills
+
+- **Bar path** (#419, #423, #431, #432, #438, #443): exits on the bar a limit / stop entry fills only see the path after the fill; exits pair FIFO with the oldest entries; stops, limits, trailing stops and partial exits fill in path order; an exit and an opposite entry reached at the same point both fill in full, nearest the open first at a gap; market orders fill at the open before gapped stops and limits; stop-limit entries wait for an earlier exit on the path.
+- **Same-bar ordering** (#413, #437, #452): `strategy.close` / `close_all` fill before same-bar entries; buy orders fill before sell orders at one open; several orders breached at a gapped open fill nearest the open first (a reduce-type OCA group reduces limits but not gapped stops).
+- **Fill prices and levels** (#426, #441, #452): gapped stop / limit entries fill at the open, except a limit opened past by less than `backtest_fill_limits_assumption` ticks, which fills at the limit; levels round by the order's side and land exactly on the grid; fractional `profit` / `loss` tick counts round as on TradingView; an order marketable at the close is sized at the close.
+- **Order functions** (#420, #434, #442, #447): re-calling an unfilled entry / order id modifies it, also on the same bar and across both commands; an OCA group is its name and type, and `strategy.exit(oca_name)` joins it; `limit` + `profit` (`stop` + `loss`) use the level reached first in Pine v6, the price leg in v5; trailing stops activate at the placing bar's close; `close` / `exit` quantities are floored to the quantity step; `strategy.exit` with every leg `na` places nothing; an exit for a missing entry places nothing; exit levels on the wrong side of the entry fill at once; `process_orders_on_close` fills exits and marketable limit / stop entries at that close.
+- **Sizing and fees** (#418, #427, #436, #447): cash and percent-of-equity orders are sized with the entry commission and slippage; a `cash_per_order` fee is shared by the trades one order closes; an entry sized against pending orders that did not fill uses its own quantity.
+
+#### Margin and risk
+
+- **Margin calls** (#417, #430, #446, #454): floored cover (4 × the cover in quantity steps, one unit when the cover rounds below a step), booked as "Close position order" / "Margin call" with slippage; margin 0 means no margin model; checkpoints at the favorable extreme and the close, and only after an intrabar entry's fill; intrabar entries admitted against the equity at their fill; market reversals admitted against the equity at the previous close and dropped whole when they fitted there but not at the fill; an orphaned reversal stop entry checked on its own quantity; pyramiding counted at fill.
+- **`strategy.risk.*`** (#429, #454): rules rebuilt from TradingView ledgers. `allow_entry_in` closes instead of reversing (and an old exit-sized order still opens a position); `max_position_size` reduces the order; `max_intraday_filled_orders`, `max_drawdown` (also after a margin call, closed at the bar's close), and `max_intraday_loss` (day starting at the open, the check after a reversal seeing the equity before its closing leg is booked) close the position with TradingView's labels; `max_cons_loss_days` counts losing days (a day closing below the previous day's close), not losing trades.
+
+#### Reporting getters
+
+- **Excursions** (#444): trade and strategy `max_runup` / `max_drawdown` (and `*_percent`) follow TradingView's path model, each trade seeing only the prices between its fills.
+- **Open trades** (#445): `strategy.opentrades.*` follow the FIFO entry records; a close for an id keeps the lots in order.
+- **Getters** (#424, #451, #454): `opentrades.capital_held`, `margin_liquidation_price` (longs above 100 % margin too), `openprofit_percent`, `account_currency`, the `*_percent` getters (entry-leg commission, negative cost basis on back-adjusted prices), `avg_*`, `opentrades.profit` at the tick-grid close, out-of-range `trade_num` (0 for the numeric getters), `trade_num = na` (trade 0), `default_entry_qty` with a negative price, `max_contracts_held_*` with several fills at one open.
+
+#### Language and runtime
+
+- **`varip`** keeps its value across the re-executions of a bar (`calc_on_order_fills`, realtime updates) (#453).
+- **A function parameter shadows a same-named global** in built-in call arguments (`g(float x) => na(x) ? … : x * 2`) (#453).
+- **Lower-timeframe `request.security` with `lookahead_on`** returns the first intrabar on historical bars (#453); `request.security` in a function called from several sites runs every call site (#422).
+- **`math.round_to_mintick`** rounds half ticks as TradingView (#453).
+- **`ta.cross*` in a lazy `and` / `or` operand** compare against the values they last saw (#428); `ta.*` warm up as TradingView on sources with leading or interleaved `na` (#421).
+- **`str.match`** returns the matched text or `""`; `bool(false)` is false; untyped UDT fields parse; a `switch` arm ending in an `if` returns its value; `(expr)[n]` history is recorded inside `and` / `or` / `?:`; `x := switch …` arms are transformed (#412).
+
 ## [0.11.1-atlas.2] - 2026-10-17 - Fork fixes (KillSwitchSIG/PineTS, branch atlas-fixes)
 
 ### Fixed

@@ -5,6 +5,7 @@ import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams, extractCallsiteId } from '../../utils';
 import { roundToMintick, roundOrderLevel, parseDirection, placeOrder, floorQty, trailArmPrice } from '../utils';
+import { checkExitLegs, checkQtyPercent } from '../validation';
 
 /**
  * Pine signature (21 named args):
@@ -58,6 +59,7 @@ export function exit(context: any) {
         extractCallsiteId(args);
 
         const parsed = parseArgsForPineParams<any>(args, EXIT_SIGNATURES, EXIT_ARGS_TYPES);
+        checkExitLegs(parsed);
 
         const extractValue = (val: any) => {
             if (val === undefined || val === null) return val;
@@ -105,6 +107,8 @@ export function exit(context: any) {
         // (TradingView, BTCUSDT 1h / AAPL 1D: `strategy.exit("x", "D", ...)` called once just before
         // `strategy.entry("D", ...)` never fires, 0 / 74).
         if (fromEntryId && !pendingEntry && !(context.strategy.opentrades as any[]).some((t) => t.entry_id === fromEntryId)) return;
+        // `qty_percent` is only checked when `qty` does not override it
+        if (qty === undefined || qty === null || isNaValue(qty)) checkQtyPercent('strategy.exit', qtyPercent);
 
         // Limit / stop levels go on the mintick grid by the exit's side, as entry levels do (TV, AAPL
         // 1D: a short's stop at 53.4925 placed with the close at 53.5425 works at 53.50). Without a

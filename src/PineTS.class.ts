@@ -6,7 +6,7 @@ import { splitTickerModifier, withTickerModifier } from './tickerModifier';
 import { createSyminfo } from './namespaces/Syminfo';
 import { Series } from './Series';
 import { Indicator } from './Indicator';
-import { processBarOrders, barPath, beginStrategyBar, riskStartBar, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
+import { processBarOrders, barPath, beginStrategyBar, riskStartBar, riskAtBarClose, processOrdersOnClose, processMarginCall, finalizeStrategyBar, finalizeStrategyRun, applyPendingCloseMarginCall, snapshotStrategyState, restoreStrategyState, snapToTick } from './namespaces/strategy/utils';
 
 import { parseTimeframe, timeframeSeconds } from './timeframe';
 
@@ -1078,8 +1078,9 @@ export class PineTS {
                         if (item.data.length > snapInfo.len) {
                             item.data.length = snapInfo.len;
                         }
-                        // Restore the last value (which may have been modified in-place)
-                        if (snapInfo.len > 0 && snapInfo.lastVal !== undefined) {
+                        // Restore the last value (which may have been modified in-place).
+                        // A `varip` keeps the value the discarded execution left in it.
+                        if (snapInfo.len > 0 && snapInfo.lastVal !== undefined && !item.varip) {
                             item.data[snapInfo.len - 1] = snapInfo.lastVal;
                         }
                     }
@@ -1339,7 +1340,9 @@ export class PineTS {
             // A scheduled phantom close call takes its place.
             if (context.strategy) {
                 const rawBar = this._snapBarForBroker(context);
+                riskAtBarClose(context);
                 if (!(context.strategy as any)._pending_close_mc) processMarginCall(context, 'close');
+                riskAtBarClose(context);
                 processOrdersOnClose(context);
                 if (rawBar) this._restoreRawBar(context, rawBar);
             }

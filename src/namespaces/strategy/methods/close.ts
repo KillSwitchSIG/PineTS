@@ -5,6 +5,7 @@ import { Order } from '../types';
 import { Series } from '../../../Series';
 import { parseArgsForPineParams } from '../../utils';
 import { argValue, isNaArg, floorQty } from '../utils';
+import { checkQtyPercent } from '../validation';
 
 /**
  * Close all trades opened by entries with the given id at market.
@@ -56,6 +57,8 @@ export function close(context: any) {
         // by fill time the new entry has already filled.
         const hasMatching = context.strategy.opentrades.some((t: any) => t.entry_id === targetId);
         if (!hasMatching) return;
+        // `qty_percent` is only checked when `qty` does not override it
+        if (qty === undefined) checkQtyPercent('strategy.close', qtyPercent);
 
         // TV semantic: strategy.close() supersedes any pending conditional
         // strategy.exit() orders that target the same entry id. Without this

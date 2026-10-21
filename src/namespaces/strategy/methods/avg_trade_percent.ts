@@ -16,7 +16,7 @@ export function avg_trade_percent(context: any) {
         let sum = 0;
         for (const t of s.closedtrades) {
             const basis = tradeCostBasis(t, pointValue);
-            if (basis > 0) sum += (100 * (t.profit ?? 0)) / basis;
+            if (basis !== 0) sum += (100 * (t.profit ?? 0)) / basis;
         }
         return sum / s.closedtrades.length;
     };

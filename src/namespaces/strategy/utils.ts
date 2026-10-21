@@ -219,8 +219,9 @@ export function computeHeldMargin(context: any, atPrice: number): number {
 /**
  * Order quantity. Cash and percent-of-equity orders are sized at the expected fill price, slippage
  * included when the order would take it (`withSlippage`: market and stop orders, not limits).
+ * `signed`: a negative quantity (negative fill price) is kept, truncated toward zero, instead of 0.
  */
-export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number, withSlippage = true): number {
+export function calculateOrderQty(context: any, specifiedQty: number | undefined, direction: number, fillPrice: number, withSlippage = true, signed = false): number {
     const strategy: StrategyState = context.strategy;
 
     // Get qty type and value, calling functions if needed
@@ -277,6 +278,7 @@ export function calculateOrderQty(context: any, specifiedQty: number | undefined
         default:
             rawQty = qtyValue;
     }
+    if (signed && rawQty < 0) return -floorQty(context, -rawQty);
     return floorQty(context, rawQty);
 }
 
@@ -548,14 +550,16 @@ function entryPathPosition(o: Order, fillPrice: number | undefined, path: number
  * A filled OCA order acts on the other pending orders of its group: strategy.oca.cancel cancels
  * them, strategy.oca.reduce takes the filled quantity off them (cancelled when nothing is left).
  */
-function applyOca(strategy: StrategyState, filled: Order, filledQty?: number): void {
+function applyOca(strategy: StrategyState, filled: Order, filledQty?: number, notReduced?: (o: Order) => boolean): void {
     const qty = filledQty ?? Math.abs((filled as any)._base_qty ?? filled.qty);
     for (const o of strategy.pending_orders) {
         // A group is its name and its type together (TV: a reduce-type and a cancel-type order sharing a
         // name both fill).
         if (o === filled || o.status !== 'pending' || o.oca_name !== filled.oca_name || o.oca_type !== filled.oca_type) continue;
         if (filled.oca_type === 'cancel') o.status = 'cancelled';
-        else if ((o.category ?? 'entry') === 'exit' && !(o.qty > 0)) {
+        else if (notReduced?.(o)) {
+            // triggered together with the filled order (see processStrategyOrders)
+        } else if ((o.category ?? 'entry') === 'exit' && !(o.qty > 0)) {
             // an exit without a fixed quantity covers whatever is left: nothing to take off it
         } else {
             o.qty = Math.max(0, o.qty - qty);
@@ -605,6 +609,24 @@ function exitFirstLegAt(context: any, o: Order, path: number[]): number {
         }
     }
     return first;
+}
+
+/**
+ * How far from `open` the nearest stop / limit leg of an exit is, among the legs the bar opens past;
+ * undefined when it opens past none.
+ */
+function exitGapDistance(context: any, o: Order, open: number): number | undefined {
+    if (isMarketCloseOrder(o)) return undefined;
+    const mintick = context.pine?.syminfo?.mintick ?? 0.01;
+    let nearest: number | undefined;
+    for (const t of context.strategy.opentrades) {
+        if (o.from_entry && t.entry_id !== o.from_entry) continue;
+        const dir = Math.sign(t.size);
+        const { tp, sl } = exitBracket(o, t._bracket_entry ?? t.entry_price, dir, mintick);
+        if (tp !== undefined && dir * (open - tp) >= 0) nearest = Math.min(nearest ?? Infinity, Math.abs(open - tp));
+        if (sl !== undefined && dir * (sl - open) >= 0) nearest = Math.min(nearest ?? Infinity, Math.abs(open - sl));
+    }
+    return nearest;
 }
 
 /**
@@ -664,9 +686,16 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
     // Market orders fill at the open before the stops and limits the bar opens past (TV, AAPL / NVDA
     // / TSLA 1D: a market long and an older short stop entry gapped through fill long first).
     const typeRank = (o: Order) => ((o.category ?? 'entry') === 'exit' ? 0 : o.type === 'market' ? 0 : o.type === 'limit' ? 2 : 1);
+    // Stops or limits the bar opens past fill nearest the open first, whatever the order they were
+    // placed in (TV, AAPL 1D: buy stops at 27.23 / 27.31 and an open of 27.7775 fill 27.31 first).
+    const gapDistance = (o: Order, at: number) => {
+        if (at !== 0 || o.type === 'market' || (o.category ?? 'entry') === 'exit') return 0;
+        const level = o.type === 'limit' ? o.limit : o.stop;
+        return level === undefined ? 0 : Math.abs(level - openPrice);
+    };
     const queue = pending_orders
         .map((o, i) => ({ o, i, at: fillAt(o) }))
-        .sort((a, b) => a.at - b.at || typeRank(a.o) - typeRank(b.o) || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
+        .sort((a, b) => a.at - b.at || typeRank(a.o) - typeRank(b.o) || gapDistance(a.o, a.at) - gapDistance(b.o, b.at) || sideAtOpen(a.o, a.at) - sideAtOpen(b.o, b.at) || a.i - b.i)
         .map((x) => x.o);
     // The position held before this bar's fills: margin is checked against it (see fillEntryOrder).
     if (!deferredOnly) (strategy as any)._preFillSize = { idx: context.idx, size: strategy.position_size };
@@ -699,16 +728,18 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                 // Limit orders fill when price reaches the limit level (past it by
                 // backtest_fill_limits_assumption ticks), at the open when the bar opens
                 // beyond it (a better price, as on TradingView: limit 7,119.35, open 7,102.50 → 7,102.50).
+                // An open past the limit by fewer than those ticks fills at the limit (TV, AAPL 1D,
+                // N = 200: limit 51.95, open 50.10, low 49.165 → 51.95).
                 if (order.limit !== undefined) {
                     const direction = parseDirection(order.direction);
                     if (direction === 1 && lowPrice <= order.limit - limitSlack) {
                         // Long limit order - buy when price drops to limit
                         shouldFill = true;
-                        fillPrice = Math.min(openPrice, order.limit);
+                        fillPrice = openPrice <= order.limit - limitSlack ? openPrice : order.limit;
                     } else if (direction === -1 && highPrice >= order.limit + limitSlack) {
                         // Short limit order - sell when price rises to limit
                         shouldFill = true;
-                        fillPrice = Math.max(openPrice, order.limit);
+                        fillPrice = openPrice >= order.limit + limitSlack ? openPrice : order.limit;
                     }
                 }
                 break;
@@ -856,7 +887,14 @@ export function processStrategyOrders(context: any, deferredOnly = false): void 
                     fillEntryOrder(context, fill, fillPrice, currentTime, openPrice);
                 });
             }
-            if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) applyOca(strategy, order);
+            if ((order.status as Order['status']) === 'filled' && ocaGrouped(order)) {
+                // Stops the bar opens past all trigger at the open: a reduce-type fill does not reduce the
+                // others (TV, AAPL 1D: stop entries of 3 and 2 both fill in full; limits are reduced, and
+                // a cancel-type fill still cancels).
+                const gappedStop = (o: Order) =>
+                    o.type === 'stop' && o.stop !== undefined && o.bar < context.idx && (o.category ?? 'entry') !== 'exit' && (parseDirection(o.direction) === 1 ? openPrice >= o.stop : openPrice <= o.stop);
+                applyOca(strategy, order, undefined, gappedStop(order) ? gappedStop : undefined);
+            }
             // A limit / stop fill at its level inside the bar: tag the trades it opened, so their exits
             // on this bar only see the path after the fill (see entryBarPathExit).
             if ((order.status as Order['status']) === 'filled' && order.type !== 'market' && fillPrice !== openPrice) {
@@ -918,10 +956,18 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 order.fill_bar = context.idx;
                 order.fill_time = currentTime;
                 riskAfterFill(context, fillPrice);
-            } else {
-                order.status = 'cancelled';
+                return;
             }
-            return;
+            // Placed against a position in the allowed direction that another exit closed before it
+            // filled: it sells / buys that position's size, opening a position (TV, BTCUSDT 1h: a sell
+            // stop of 0.08051 after the long of 0.08051 was closed by its exit, then a short of 0.08051).
+            const exitQty = order._isReversalEntry && (order as any)._base_qty !== undefined ? order.qty - (order as any)._base_qty : 0;
+            if (posSize !== 0 || !(exitQty > 1e-9)) {
+                order.status = 'cancelled';
+                return;
+            }
+            order.qty = exitQty;
+            (order as any)._base_qty = exitQty;
         }
         if (rules.max_position_size !== undefined) {
             const max = Number(rules.max_position_size);
@@ -983,13 +1029,25 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
             // stop reversal needing 10,044.06 at 64,257.33, equity 10,044.53 at the open but 10,035.06
             // at the fill: the long closes, no short opens).
             const intrabar = (context._pathAt ?? 0) > 0 && (context._pathAt ?? 0) < 3;
+            // A market order filling at the open is checked against the account where it was placed
+            // (the previous close), its margin at the fill price (TV, AAPL 1D, 100 % of equity: equity
+            // 11,869.15 at the signal's close, 255 × 46.60 = 11,883.00 at the next open → no fill,
+            // although the equity at that open was 11,912.50).
+            const placement = (strategy as any)._placement;
+            const atPlacement = order.type === 'market' && context._pathAt === 0 && placement?.idx === context.idx ? placement : undefined;
             let heldMarginRemaining = 0;
             if (oldSign === direction) {
-                heldMarginRemaining = computeHeldMargin(context, intrabar ? fillPrice : markPrice);
+                heldMarginRemaining = computeHeldMargin(context, intrabar ? fillPrice : atPlacement ? atPlacement.price : markPrice);
             }
-            const equityNow = intrabar && oldSize !== 0 ? computeEquityAtPrice(context, fillPrice) : strategy.equity;
+            const equityNow = atPlacement ? atPlacement.equity : intrabar && oldSize !== 0 ? computeEquityAtPrice(context, fillPrice) : strategy.equity;
             const availableEquity = equityNow - heldMarginRemaining;
-            const requiredMargin = computeRequiredMargin(newOpenQty, fillPrice, marginPct, pointValue);
+            // A stop / limit entry sized to reverse a position that another exit closed before it
+            // filled is checked for its own quantity only; it fills whole and the margin call trims it
+            // (TV, ES1! 1D: 2 + 2 contracts at 4,363.25 for equity 865,776 after the long's stop exit,
+            // then a margin call of 1 contract).
+            const orphanedReversal = oldSize === 0 && order._isReversalEntry && !(order as any)._reversesPending && order.type !== 'market' && (order as any)._base_qty !== undefined;
+            const checkedQty = orphanedReversal ? Math.min((order as any)._base_qty, newOpenQty) : newOpenQty;
+            const requiredMargin = computeRequiredMargin(checkedQty, fillPrice, marginPct, pointValue);
             // An entry sized to reverse the position the orders queued before it would open (its own
             // quantity b plus their s), filling while flat and too large for the account. Fitted on
             // TradingView probes (BTC at 83,952, quantities 1–3, capital 60,000–400,000), not
@@ -1003,7 +1061,12 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 requiredMargin > availableEquity && (order as any)._reversesPending && oldSize === 0 && part > 0 && !fits(order.qty - part) && fits(part);
             if (partFills) order.qty = part;
 
-            if (requiredMargin > availableEquity && !partFills) {
+            // ...and when its own quantity does not fit, the part sized to close the position fills
+            // alone (TV, AAPL 1D: 205 + 209 shares after the long of 205 closed at 44.95, 209 × 44.95 =
+            // 9,394.55 against 9,348.77 → a short of 205).
+            if (requiredMargin > availableEquity && orphanedReversal && order.qty - baseQty > 1e-9) {
+                order.qty -= baseQty;
+            } else if (requiredMargin > availableEquity && !partFills) {
                 // TV broker emulator: the margin check only guards the
                 // OPEN leg. On a reversal, the close leg always
                 // executes (it frees margin / realizes the position) —
@@ -1012,8 +1075,12 @@ function fillEntryOrder(context: any, order: Order, fillPrice: number, currentTi
                 // QA margin_calls xlsx: after a partial margin-call
                 // liquidation, the remainder was closed by the next
                 // reversal order whose open leg was margin-rejected.
+                // A market reversal whose open leg fitted the account at its placement price is
+                // dropped whole instead: the position stays open (TV, AAPL 1D above: the long is held
+                // to a later signal; a fixed 1 BTC reversal not fitting at placement closes the short).
                 const qtyToClose = Math.min(Math.abs(oldSize), order.qty);
-                if (reversesHeld && qtyToClose > 0) {
+                const fittedAtPlacement = atPlacement && computeRequiredMargin(newOpenQty, atPlacement.price, marginPct, pointValue) <= availableEquity;
+                if (reversesHeld && qtyToClose > 0 && !fittedAtPlacement) {
                     closePartialPosition(context, qtyToClose, fillPrice, currentTime, {
                         exitId: order.id,
                         exitComment: order.comment,
@@ -1230,15 +1297,53 @@ function applySlippage(context: any, direction: number, nominalPrice: number): n
 /**
  * Update max_contracts_held_* peaks after a position-size change.
  * Called whenever position_size mutates (openTrade / closePartialPosition).
+ * Order fills at the bar's open are collected instead (see flushOpenFills): `delta` is the fill's
+ * signed change of the position, `price` its price, `orderFill` false for margin calls and risk
+ * close-outs.
  */
-function updateMaxContractsHeld(strategy: StrategyState): void {
-    const abs = Math.abs(strategy.position_size);
-    if (abs > strategy.max_contracts_held_all) strategy.max_contracts_held_all = abs;
-    if (strategy.position_size > strategy.max_contracts_held_long) {
-        strategy.max_contracts_held_long = strategy.position_size;
+function updateMaxContractsHeld(strategy: StrategyState, context?: any, delta = 0, price = NaN, orderFill = true): void {
+    const batch = (strategy as any)._openFills;
+    const atOpen = () => {
+        const open = Series.from(context.data.open).get(0);
+        const slip = (strategy.config.slippage ?? 0) * (context.pine?.syminfo?.mintick ?? 0.01);
+        return Math.abs(price - open) <= slip + 1e-9 * Math.abs(open);
+    };
+    if (batch && orderFill && context && batch.idx === context.idx && context._pathAt === 0 && atOpen()) {
+        if (delta > 0) batch.buys += delta;
+        else batch.sells += delta;
+        batch.real.push(strategy.position_size);
+        return;
     }
-    if (-strategy.position_size > strategy.max_contracts_held_short) {
-        strategy.max_contracts_held_short = -strategy.position_size;
+    latchContractsHeld(strategy, strategy.position_size);
+}
+
+function latchContractsHeld(strategy: StrategyState, size: number): void {
+    const abs = Math.abs(size);
+    if (abs > strategy.max_contracts_held_all) strategy.max_contracts_held_all = abs;
+    if (size > strategy.max_contracts_held_long) strategy.max_contracts_held_long = size;
+    if (-size > strategy.max_contracts_held_short) strategy.max_contracts_held_short = -size;
+}
+
+/**
+ * max_contracts_held_* over the order fills at the bar's open, in TradingView's order there: the
+ * buys, then the sells (TV, BINANCE:BTCUSDT 1h: strategy.close("L") + strategy.entry("L") on one bar
+ * → long 2 for a position of 1; a short add and a breached strategy.exit stop at one open → short 1,
+ * the stop closing the old short). The fills themselves are booked in PineTS's own order; when the
+ * buys-first position would be on a side neither the start nor the end of the open is on, the
+ * positions PineTS went through are used.
+ */
+function flushOpenFills(strategy: StrategyState): void {
+    const batch = (strategy as any)._openFills;
+    (strategy as any)._openFills = undefined;
+    if (!batch || batch.real.length === 0) return;
+    const afterBuys = batch.start + batch.buys;
+    const end = batch.start + batch.buys + batch.sells;
+    const side = Math.sign(Math.abs(afterBuys) < 1e-9 ? 0 : afterBuys);
+    if (side === 0 || side === Math.sign(batch.start) || side === Math.sign(Math.abs(end) < 1e-9 ? 0 : end)) {
+        latchContractsHeld(strategy, afterBuys);
+        latchContractsHeld(strategy, Math.abs(end) < 1e-9 ? 0 : end);
+    } else {
+        for (const size of batch.real) latchContractsHeld(strategy, size);
     }
 }
 
@@ -1297,6 +1402,7 @@ type RiskState = {
     blockFrom?: number; // orders placed from this bar to blockTo (the end of the blocked day) are rejected
     blockTo?: number;
     haltedFrom?: number; // orders placed on or after this bar are rejected
+    dayStartBar?: number; // the day's first bar, until its open fills are done (see riskOpenFills)
 };
 
 function riskState(context: any): RiskState {
@@ -1343,8 +1449,17 @@ function riskCloseOut(context: any, reason: string, price: number, scope: 'day' 
     const strategy: StrategyState = context.strategy;
     const st = riskState(context);
     const time = Series.from(context.data.openTime).get(0);
+    // strategy.close / close_all orders due at the open where the rule triggers still fill there first
+    // (TV, BTCUSDT 1h, max_intraday_filled_orders(4): close_all queued after a pyramiding add, both at
+    // one open → the three older lots "Close position order", only the add closed under the rule).
+    if (context._pathAt === 0 && !(st as any)._closingOut) {
+        (st as any)._closingOut = true;
+        processExitOrders(context, 'market');
+        (st as any)._closingOut = false;
+        setFillAt(context, 0);
+    }
     if (strategy.opentrades.length > 0 && strategy.position_size !== 0) {
-        closePartialPosition(context, Math.abs(strategy.position_size), price, time, { exitId: reason, exitComment: reason });
+        closePartialPosition(context, Math.abs(strategy.position_size), price, time, { exitId: reason, exitComment: reason, forced: true });
     }
     for (const o of strategy.pending_orders) if (o.status === 'pending') o.status = 'cancelled';
     if (scope === 'day') {
@@ -1394,6 +1509,22 @@ export function riskStartBar(context: any): void {
     st.dayStartEquity = strategy.equity;
     st.dayMaxEquity = strategy.equity;
     st.dayFills = 0;
+    st.dayStartBar = context.idx;
+}
+
+/**
+ * max_intraday_loss: the day starts at the open of its first bar, after the fills there, which are
+ * not checked against it (TV, AAPL 1D, 1 %: a gap down from 55.60 to 52.39 keeps the trade, the loss
+ * counted from the open; BTCUSDT 1D: a long reversed at the open for +1,996 against a 1,500 limit
+ * goes on). Called before the bar's fills and after each fill at the open.
+ */
+function riskOpenFills(context: any): boolean {
+    const st = (context.strategy as any)._risk as RiskState | undefined;
+    if (!st || st.dayStartBar !== context.idx || !(context._pathAt === undefined || context._pathAt === 0)) return false;
+    const seg = context._excSeg;
+    if (seg && seg.scale > 0) return false;
+    st.dayStartEquity = st.dayMaxEquity = computeEquityAtPrice(context, Series.from(context.data.open).get(0));
+    return true;
 }
 
 /** After an order filled at `price`: filled-order count, realized drawdown, intraday loss. */
@@ -1402,10 +1533,12 @@ export function riskAfterFill(context: any, price: number): void {
     // Order fills (entries, exits, closes; not margin calls or risk close-outs): calc_on_order_fills
     // runs the script again after the bar points where this count moved.
     if (strategy) (strategy as any)._fillCount = ((strategy as any)._fillCount ?? 0) + 1;
+    const fillPnl = (strategy as any)?._fillPnl ?? 0;
+    if (strategy) (strategy as any)._fillPnl = 0;
     const rules = strategy?.risk_rules;
     if (!rules || Object.keys(rules).length === 0) return;
     const st = riskState(context);
-    if (st.haltedFrom !== undefined) return;
+    if (st.haltedFrom !== undefined || (st as any)._closingOut) return;
     st.dayFills++;
     const realized = strategy.initial_capital + strategy.netprofit;
     st.realizedPeak = Math.max(st.realizedPeak, realized);
@@ -1418,10 +1551,14 @@ export function riskAfterFill(context: any, price: number): void {
     if (rules.max_intraday_filled_orders && st.dayFills >= Number(rules.max_intraday_filled_orders.count)) {
         return riskCloseOut(context, RISK_REASON.orders, price, 'day');
     }
-    if (rules.max_intraday_loss) riskIntradayLoss(context, price);
+    // The check after a reversal sees the equity before the P&L its closing leg booked (TV, BTCUSDT 1h,
+    // 1,500 cash: a short held from the previous day reversed for +1,260.68, equity 93,183.19 for
+    // 93,462.83 at the day start → closed at that open; 27 halts of 27). After a close order the P&L
+    // is booked (BTCUSDT 1h, 1 %: close_all at +228 mid-day, trading goes on).
+    if (rules.max_intraday_loss && !riskOpenFills(context)) riskIntradayLoss(context, price, fillPnl);
 }
 
-function riskIntradayLoss(context: any, price: number): boolean {
+function riskIntradayLoss(context: any, price: number, unbooked = 0): boolean {
     const strategy: StrategyState = context.strategy;
     const rule = strategy.risk_rules.max_intraday_loss;
     if (!rule) return false;
@@ -1429,7 +1566,7 @@ function riskIntradayLoss(context: any, price: number): boolean {
     if (st.blockedDay === st.day) return false;
     const equity = strategy.position_size !== 0 ? computeEquityAtPrice(context, price) : strategy.initial_capital + strategy.netprofit;
     st.dayMaxEquity = Math.max(st.dayMaxEquity, equity);
-    const loss = st.dayStartEquity - equity;
+    const loss = st.dayStartEquity - (equity - unbooked);
     const v = Number(rule.value);
     const limit = rule.type === 'percent_of_equity' ? (v / 100) * st.dayMaxEquity : v;
     if (loss >= limit - 1e-9) {
@@ -1437,6 +1574,32 @@ function riskIntradayLoss(context: any, price: number): boolean {
         return true;
     }
     return false;
+}
+
+/**
+ * After a margin call at `price`: max_drawdown on the equity there, open profit included; when reached,
+ * the position is closed at the bar's close, after the script (see riskAtBarClose). TV, BTCUSDT 1h,
+ * 100 % of equity: a call at the 66,011.47 high leaves 9,690.60, 3.0940 % under the 10,000 peak →
+ * closed at the 65,978.79 close with limits up to 3.092 %, not 3.10 %; 3.047 % at that close.
+ */
+function riskAfterMarginCall(context: any, price: number): void {
+    const strategy: StrategyState = context.strategy;
+    const rule = strategy.risk_rules?.max_drawdown;
+    if (!rule) return;
+    const st = riskState(context);
+    if (st.haltedFrom !== undefined) return;
+    const dd = st.realizedPeak - computeEquityAtPrice(context, price);
+    const v = Number(rule.value);
+    if (rule.type === 'percent_of_equity' ? (100 * dd) / st.realizedPeak >= v - 1e-12 : dd >= v - 1e-9) (st as any)._drawdownAtClose = context.idx;
+}
+
+/** At the bar's close, after the script: a max_drawdown close-out scheduled by a margin call on this bar. */
+export function riskAtBarClose(context: any): void {
+    const st = (context.strategy as any)?._risk as RiskState | undefined;
+    if (!st || (st as any)._drawdownAtClose !== context.idx) return;
+    (st as any)._drawdownAtClose = undefined;
+    setFillAt(context, 3);
+    riskCloseOut(context, RISK_REASON.drawdown, Series.from(context.data.close).get(0), 'forever');
 }
 
 /** After the bar's fills: max_intraday_loss at the bar's adverse extreme for the open position. */
@@ -1580,7 +1743,7 @@ export function openTrade(
         strategy.position_size = newSize;
     }
 
-    updateMaxContractsHeld(strategy);
+    updateMaxContractsHeld(strategy, context, trade.size, price);
 }
 
 /**
@@ -1667,6 +1830,8 @@ export interface CloseInfo {
     isImplicitReversal?: boolean;
     /** The closing leg's part of the reversal order's quantity (its share of a cash_per_order fee). */
     reversalShare?: number;
+    /** A margin call or a risk-rule close-out, not an order fill. */
+    forced?: boolean;
 }
 
 type LedgerSlice = {
@@ -1751,6 +1916,7 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     const strategy: StrategyState = context.strategy;
     const pointValue = context.pine?.syminfo?.pointvalue ?? 1;
     let remainingQty = qtyToClose;
+    const netprofitBefore = strategy.netprofit;
 
     // Close trades from oldest to newest (FIFO)
     const tradesToClose = [...strategy.opentrades];
@@ -1890,7 +2056,9 @@ export function closePartialPosition(context: any, qtyToClose: number, exitPrice
     if (Math.abs(newSize) < 1e-9) newSize = 0;
 
     strategy.position_size = newSize;
-    updateMaxContractsHeld(strategy);
+    updateMaxContractsHeld(strategy, context, newSize - currentSize, exitPrice, !closeInfo?.forced);
+    // The P&L a reversal's closing leg books, for the risk check after the fill (see riskAfterFill).
+    if (closeInfo?.isImplicitReversal) (strategy as any)._fillPnl = ((strategy as any)._fillPnl ?? 0) + (strategy.netprofit - netprofitBefore);
 
     if (newSize === 0) {
         strategy.position_avg_price = NaN;
@@ -2420,10 +2588,17 @@ export function processExitOrders(context: any, phase: 'market' | 'open' | 'intr
         Series.from(context.data.low).get(0),
         Series.from(context.data.close).get(0),
     );
-    const ordered = strategy.pending_orders
+    const ranked = strategy.pending_orders
         .map((o, i) => ({ o, i, at: phase === 'intrabar' && (o.category ?? 'entry') === 'exit' ? exitFirstLegAt(context, o, exitPath) : 0 }))
-        .sort((a, b) => a.at - b.at || a.i - b.i)
-        .map((x) => x.o);
+        .sort((a, b) => a.at - b.at || a.i - b.i);
+    // Exits whose stop / limit the bar opens past fill nearest the open first (TV, AAPL 1D: take-profits
+    // at 27.43 and 27.52 with an open of 27.95 book the 27.52 one first); other orders keep their place.
+    const gapped = ranked
+        .map((x, slot) => ({ x, slot, d: x.at === 0 && (x.o.category ?? 'entry') === 'exit' ? exitGapDistance(context, x.o, openPrice) : undefined }))
+        .filter((g): g is { x: (typeof ranked)[number]; slot: number; d: number } => g.d !== undefined);
+    const slots = gapped.map((g) => g.slot);
+    gapped.sort((a, b) => a.d - b.d || a.slot - b.slot).forEach((g, j) => (ranked[slots[j]] = g.x));
+    const ordered = ranked.map((x) => x.o);
     for (const order of ordered) {
         if (order.status !== 'pending') continue;
         if ((order.category ?? 'entry') !== 'exit') continue;
@@ -2871,6 +3046,7 @@ export function applyPendingCloseMarginCall(context: any): void {
     closePartialPosition(context, Math.min(pending.qty, Math.abs(strategy.position_size)), applySlippage(context, -pending.dir, pending.price), pending.time, {
         exitId: MARGIN_CALL_EXIT_ID,
         exitComment: 'Margin call',
+        forced: true,
     });
 
     if (Math.abs(strategy.position_size) > 1e-9) {
@@ -3017,7 +3193,9 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
         closePartialPosition(context, qtyToLiquidate, applySlippage(context, -positionDir, adversePrice), currentTime, {
             exitId: MARGIN_CALL_EXIT_ID,
             exitComment: 'Margin call',
+            forced: true,
         });
+        riskAfterMarginCall(context, adversePrice);
 
         // ---- Phantom re-check → SECOND margin call at the bar's CLOSE ----
         // TV broker-emulator behavior (reverse-engineered 2026-06-12,
@@ -3085,6 +3263,15 @@ export function processMarginCall(context: any, checkpoint: 'open' | 'extreme' |
  * at the open, then the margin checkpoints and the intrabar exits along the bar's path.
  */
 export function processBarOrders(context: any): void {
+    if (context.strategy) (context.strategy as any)._openFills = { idx: context.idx, start: context.strategy.position_size, buys: 0, sells: 0, real: [] };
+    if (context.strategy?.risk_rules?.max_intraday_loss) riskOpenFills(context);
+    // The account where the market orders filling at this open were placed: the previous close (a
+    // calc_on_order_fills segment after the first: its starting point), for their margin check.
+    if (context.strategy) {
+        const seg = context._excSeg;
+        const at = seg && seg.scale > 0 ? Series.from(context.data.open).get(0) : Series.from(context.data.close).get(1);
+        if (Number.isFinite(at)) (context.strategy as any)._placement = { idx: context.idx, price: at, equity: computeEquityAtPrice(context, at) };
+    }
     // strategy.close / close_all market orders fill at the open ahead of entries (see
     // processExitOrders' 'market' phase).
     processExitOrders(context, 'market');
@@ -3110,6 +3297,7 @@ export function processBarOrders(context: any): void {
         riskEndOfBarFills(context);
         processMarginCall(context, 'extreme');
     }
+    if (context.strategy) flushOpenFills(context.strategy);
 }
 
 /**

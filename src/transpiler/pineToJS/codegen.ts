@@ -920,6 +920,15 @@ export class CodeGenerator {
                 this.renameDiscardTargets(decl.id.elements);
             }
 
+            // `varip` keeps the JS `var` storage but must survive re-executions of a bar
+            // (calc_on_order_fills, realtime updates). The marker precedes the declaration
+            // so the AnalysisPass can flag it; emitting it after would displace a
+            // declaration that ends a function body.
+            if (node.kind === 'varip' && decl.id?.type === 'Identifier') {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write(`${JSON.stringify(`__pineVarip:${decl.id.name}`)};\n`);
+            }
+
             // Check if init is a complex if expression that needs statement-based generation
             if (decl.init && decl.init.type === 'ConditionalExpression' && decl.init.needsIIFE) {
                 // Generate: let varName;\n if (...) { varName = ... } else { varName = ... }
