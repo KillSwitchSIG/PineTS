@@ -920,6 +920,15 @@ export class CodeGenerator {
                 this.renameDiscardTargets(decl.id.elements);
             }
 
+            // `varip` keeps the JS `var` storage but must survive re-executions of a bar
+            // (calc_on_order_fills, realtime updates). The marker precedes the declaration
+            // so the AnalysisPass can flag it; emitting it after would displace a
+            // declaration that ends a function body.
+            if (node.kind === 'varip' && decl.id?.type === 'Identifier') {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write(`${JSON.stringify(`__pineVarip:${decl.id.name}`)};\n`);
+            }
+
             // Check if init is a complex if expression that needs statement-based generation
             if (decl.init && decl.init.type === 'ConditionalExpression' && decl.init.needsIIFE) {
                 // Generate: let varName;\n if (...) { varName = ... } else { varName = ... }
@@ -2046,6 +2055,53 @@ export class CodeGenerator {
         }
     }
 
+    // An `if` that is the value of a block inside an IIFE (e.g. a switch arm): each branch returns its
+    // last expression. A branch that produces no value falls through to the caller's `return null`.
+    generateIfWithReturns(node) {
+        this.write(this.indentStr.repeat(this.indent));
+        this.write('if (');
+        this.generateExpression(node.test);
+        this.write(') ');
+        this.generateBlockWithReturn(node.consequent);
+        if (node.alternate) {
+            this.write(' else ');
+            if (node.alternate.type === 'IfStatement') {
+                this.write('{\n');
+                this.indent++;
+                this.generateIfWithReturns(node.alternate);
+                this.indent--;
+                this.write(this.indentStr.repeat(this.indent));
+                this.write('}');
+            } else {
+                this.generateBlockWithReturn(node.alternate);
+            }
+        }
+        this.write('\n');
+    }
+
+    generateBlockWithReturn(block) {
+        const body = block.type === 'BlockStatement' ? block.body : [block];
+        this.write('{\n');
+        this.indent++;
+        body.forEach((stmt, i) => {
+            const isLast = i === body.length - 1;
+            if (isLast && stmt.type === 'ExpressionStatement') {
+                this.write(this.indentStr.repeat(this.indent));
+                this.write('return ');
+                this.generateExpression(stmt.expression);
+                this.write(';\n');
+            } else if (isLast && stmt.type === 'IfStatement') {
+                this.generateIfWithReturns(stmt);
+            } else {
+                this.write(this.indentStr.repeat(this.indent));
+                this.generateStatement(stmt);
+            }
+        });
+        this.indent--;
+        this.write(this.indentStr.repeat(this.indent));
+        this.write('}');
+    }
+
     // Helper to generate nested if as expression return
     generateNestedIfAsExpression(node) {
         if (node.type === 'IfStatement') {
@@ -2172,8 +2228,17 @@ export class CodeGenerator {
                         this.generateExpression(c.consequent);
                     }
                     this.write(';\n');
+                } else if (lastStmt.type === 'IfStatement') {
+                    // The arm's value is an `if` expression
+                    for (let i = 0; i < c.statements.length - 1; i++) {
+                        this.write(this.indentStr.repeat(this.indent));
+                        this.generateStatement(c.statements[i]);
+                    }
+                    this.generateIfWithReturns(lastStmt);
+                    this.write(this.indentStr.repeat(this.indent));
+                    this.write('return null;\n');
                 } else {
-                    // All statements are side-effect only (like IfStatement), generate all of them
+                    // All statements are side-effect only, generate all of them
                     for (let i = 0; i < c.statements.length; i++) {
                         this.write(this.indentStr.repeat(this.indent));
                         this.generateStatement(c.statements[i]);
@@ -2250,6 +2315,14 @@ export class CodeGenerator {
                         this.generateExpression(c.consequent);
                     }
                     this.write(';\n');
+                } else if (lastStmt.type === 'IfStatement') {
+                    for (let j = 0; j < c.statements.length - 1; j++) {
+                        this.write(this.indentStr.repeat(this.indent));
+                        this.generateStatement(c.statements[j]);
+                    }
+                    this.generateIfWithReturns(lastStmt);
+                    this.write(this.indentStr.repeat(this.indent));
+                    this.write('return null;\n');
                 } else {
                     for (const stmt of c.statements) {
                         this.write(this.indentStr.repeat(this.indent));

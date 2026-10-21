@@ -574,7 +574,7 @@ export function runTransformationPass(
             // `ReferenceError: <name> is not defined` at runtime.
             const traverseForIIFEs = (n: any): void => {
                 if (!n) return;
-                if (n.type === 'CallExpression' && n.callee &&
+                if (n.type === 'CallExpression' && n.callee && !n._iifeTransformed &&
                     (n.callee.type === 'ArrowFunctionExpression' || n.callee.type === 'FunctionExpression')) {
                     c(n.callee, state);
                 }

@@ -71,6 +71,8 @@ export class ScopeManager {
     private arrayPatternElements: Set<string> = new Set();
     private rootParams: Set<string> = new Set();
     private localSeriesVars: Set<string> = new Set();
+    /** Parameters of the user function being transformed (a subset of localSeriesVars). */
+    private functionParams: Set<string> = new Set();
     private varKinds: Map<string, string> = new Map();
     private loopVars: Set<string> = new Set();
     private loopVarNames: Map<string, string> = new Map(); // Map original names to transformed names
@@ -85,6 +87,7 @@ export class ScopeManager {
     private loopGuardCounter: number = 0;
     private hoistingStack: any[][] = [];
     private suppressHoisting: boolean = false;
+    private inLoopTest: boolean = false;
     private reservedNames: Set<string> = new Set();
     private userFunctions: Set<string> = new Set();
     private userMethods: Set<string> = new Set();
@@ -295,6 +298,20 @@ export class ScopeManager {
 
     isLocalSeriesVar(name: string): boolean {
         return this.localSeriesVars.has(name);
+    }
+
+    addFunctionParam(name: string): void {
+        this.functionParams.add(name);
+        this.localSeriesVars.add(name);
+    }
+
+    removeFunctionParam(name: string): void {
+        this.functionParams.delete(name);
+        this.localSeriesVars.delete(name);
+    }
+
+    isFunctionParam(name: string): boolean {
+        return this.functionParams.has(name);
     }
 
     // ── UDT registry ────────────────────────────────────────────────────
@@ -644,6 +661,22 @@ export class ScopeManager {
 
     setSuppressHoisting(suppress: boolean): void {
         this.suppressHoisting = suppress;
+    }
+
+    setInLoopTest(inLoopTest: boolean): void {
+        this.inLoopTest = inLoopTest;
+    }
+
+    /**
+     * Hoist a statement ahead of the current statement even inside a lazy `and` / `or` / `?:` operand,
+     * where `addHoistedStatement` is suppressed. For values that must be recorded on every bar the
+     * statement runs (the history series of `(expr)[n]`). Not inside a loop test, which is re-evaluated
+     * on each iteration. Returns false when the statement was not hoisted.
+     */
+    addEagerHoistedStatement(stmt: any): boolean {
+        if (this.hoistingStack.length === 0 || this.inLoopTest) return false;
+        this.hoistingStack[this.hoistingStack.length - 1].push(stmt);
+        return true;
     }
 
     shouldSuppressHoisting(): boolean {
